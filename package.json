@@ -1,0 +1,23 @@
+{
+  "name": "team-bot",
+  "version": "1.0.0",
+  "description": "AI-powered WhatsApp Tech Team Assistant & Teammate Bot",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.5.0",
+    "node-cron": "^3.0.3",
+    "pino": "^9.7.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
