@@ -179,9 +179,34 @@ export async function connectToWhatsApp() {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      // Skip status broadcasts, empty, or our own messages
+      // Skip status broadcasts or empty messages
       if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
-      if (msg.key.fromMe) continue;
+
+      // If message is from the bot's own linked phone, only process if explicitly triggered
+      // (allows the developer to test from their own phone without the bot looping on its own replies)
+      if (msg.key.fromMe) {
+        const text = (
+          msg.message.conversation ||
+          msg.message.extendedTextMessage?.text ||
+          ''
+        ).trim().toLowerCase();
+        const botName = (process.env.BOT_NAME || 'teambot').toLowerCase();
+
+        const isExplicitSelfCommand =
+          text.startsWith('@bot') ||
+          text.startsWith('/bot') ||
+          text.startsWith(`@${botName}`) ||
+          text.startsWith(`/${botName}`) ||
+          text.startsWith('/tasks') ||
+          text.startsWith('/deadlines') ||
+          text.startsWith('/notes') ||
+          text.startsWith('/standup') ||
+          text.startsWith('/status') ||
+          text.startsWith('/ping') ||
+          text.startsWith('/help');
+
+        if (!isExplicitSelfCommand) continue;
+      }
 
       const remoteJid = msg.key.remoteJid;
       const isGroup = remoteJid?.endsWith('@g.us');

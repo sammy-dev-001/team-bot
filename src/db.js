@@ -221,10 +221,10 @@ export function getTasksDueSoon(withinHours = 24, flagField = 'notified_24h') {
     SELECT * FROM tasks
     WHERE status NOT IN ('done')
       AND due_date != ''
-      AND due_date <= datetime('now', '+' || ? || ' hours')
-      AND due_date >= datetime('now')
+      AND datetime(due_date) <= datetime('now', '+' || ? || ' hours')
+      AND datetime(due_date) >= datetime('now')
       AND ${safeFlag} = 0
-    ORDER BY due_date ASC
+    ORDER BY datetime(due_date) ASC
   `).all(withinHours);
 }
 
@@ -250,11 +250,11 @@ export function listDeadlines({ upcomingOnly = true } = {}) {
   if (upcomingOnly) {
     return db.prepare(`
       SELECT * FROM deadlines
-      WHERE due_date >= datetime('now')
-      ORDER BY due_date ASC
+      WHERE datetime(due_date) >= datetime('now')
+      ORDER BY datetime(due_date) ASC
     `).all();
   }
-  return db.prepare('SELECT * FROM deadlines ORDER BY due_date ASC').all();
+  return db.prepare('SELECT * FROM deadlines ORDER BY datetime(due_date) ASC').all();
 }
 
 /** Delete a deadline by ID. */
@@ -269,8 +269,8 @@ export function deleteDeadline(id) {
 export function getUpcomingDeadlines() {
   return db.prepare(`
     SELECT * FROM deadlines
-    WHERE due_date >= datetime('now')
-    ORDER BY due_date ASC
+    WHERE datetime(due_date) >= datetime('now')
+    ORDER BY datetime(due_date) ASC
   `).all();
 }
 
@@ -280,10 +280,10 @@ export function getDeadlinesDueSoon(withinHours = 24, flagField = 'notified_24h'
   const safeFlag = validFlags.includes(flagField) ? flagField : 'notified_24h';
   return db.prepare(`
     SELECT * FROM deadlines
-    WHERE due_date >= datetime('now')
-      AND due_date <= datetime('now', '+' || ? || ' hours')
+    WHERE datetime(due_date) >= datetime('now')
+      AND datetime(due_date) <= datetime('now', '+' || ? || ' hours')
       AND ${safeFlag} = 0
-    ORDER BY due_date ASC
+    ORDER BY datetime(due_date) ASC
   `).all(withinHours);
 }
 
