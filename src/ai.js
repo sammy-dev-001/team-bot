@@ -23,6 +23,7 @@ import {
   deleteDeadline,
   saveProjectNote,
   searchProjectNotes,
+  getNow,
 } from './db.js';
 
 // ─── Client ──────────────────────────────────────────────────────────────────
@@ -261,6 +262,7 @@ function buildSystemPrompt(groupJid) {
     dateStyle: 'full',
     timeStyle: 'short',
   }).format(new Date());
+  const nowIso = getNow();
 
   // Team directory
   const members = getAllMembers();
@@ -306,7 +308,7 @@ function buildSystemPrompt(groupJid) {
   return `You are ${process.env.BOT_NAME || 'TeamBot'}, a sharp senior software engineer and active teammate in this tech squad's WhatsApp group. You are based in Nigeria 🇳🇬 (Lagos tech ecosystem vibe), pragmatic, competent, and deeply supportive of the team.
 
 ═══ CURRENT CONTEXT ═══
-📅 Date/Time (${tz}): ${now}
+📅 Date/Time (${tz}): ${now} [Local: ${nowIso}]
 
 ═══ TEAM DIRECTORY ═══
 ${memberLines}

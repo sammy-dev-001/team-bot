@@ -17,6 +17,8 @@ import {
   markDeadlineNotified,
   getTasksDueSoon,
   markTaskNotified,
+  getTasksDueNow,
+  markTaskDueNotified,
   pruneOldMessages,
 } from './db.js';
 import { generateStandupBrief } from './ai.js';
@@ -84,8 +86,6 @@ async function runDailyStandup(sock) {
 
 async function runWatchdog(sock) {
   const groups = getTargetGroups();
-  if (groups.length === 0) return;
-
   console.log('[Scheduler] 👀 Running hourly watchdog…');
 
   const primaryGroup = groups[0];
@@ -158,6 +158,15 @@ async function runWatchdog(sock) {
         await sendSafeMessage(sock, groupJid, alertText, null, mentions);
       }
 
+      // If no group is configured (e.g. DM testing), notify assignee directly
+      if (groups.length === 0) {
+        for (const t of tasksDue) {
+          if (t.assigned_to_jid) {
+            await sendSafeMessage(sock, t.assigned_to_jid, alertText);
+          }
+        }
+      }
+
       // Mark tasks as notified so the watchdog doesn't spam every hour
       for (const t of tasksDue) {
         markTaskNotified(t.id, 'notified_24h');
@@ -170,6 +179,45 @@ async function runWatchdog(sock) {
   }
 }
 
+// ─── Job 3: Minute-level Due Reminder Watchdog ───────────────────────────────
+
+async function runDueReminderWatchdog(sock) {
+  try {
+    const dueTasks = getTasksDueNow();
+    if (dueTasks.length === 0) return;
+
+    const groups = getTargetGroups();
+
+    for (const task of dueTasks) {
+      const alertText =
+        `⏰ *REMINDER: TASK DUE NOW!* ⏰\n\n` +
+        `*Task:* ${task.title}\n` +
+        (task.description ? `📝 *Details:* ${task.description}\n` : '') +
+        (task.project_name ? `📁 *Project:* ${task.project_name}\n` : '') +
+        `📅 *Due:* ${task.due_date}\n` +
+        `\nOya, time to get this done! 🚀`;
+
+      // 1. If assigned to a user, notify them in their DM (works even in DM testing)
+      if (task.assigned_to_jid) {
+        await sendSafeMessage(sock, task.assigned_to_jid, alertText);
+        console.log(`[Scheduler] 🔔 Due reminder sent to ${task.assigned_to_jid} for task #${task.id}`);
+      }
+
+      // 2. Broadcast to team groups if configured
+      for (const groupJid of groups) {
+        if (groupJid !== task.assigned_to_jid) {
+          const mention = task.assigned_to_jid ? [task.assigned_to_jid] : [];
+          await sendSafeMessage(sock, groupJid, alertText, null, mention);
+        }
+      }
+
+      markTaskDueNotified(task.id);
+    }
+  } catch (err) {
+    console.error('[Scheduler] Minute reminder watchdog error:', err.message);
+  }
+}
+
 // ─── Bootstrap scheduler ─────────────────────────────────────────────────────
 
 /**
@@ -179,6 +227,17 @@ async function runWatchdog(sock) {
  * @param {Function} getSocket - () => sock   (from whatsapp.js)
  */
 export function startScheduler(getSocket) {
+  // Minute-by-minute task due watchdog (for exact scheduled reminders)
+  cron.schedule(
+    '* * * * *',
+    () => {
+      const sock = getSocket();
+      if (!sock) return;
+      runDueReminderWatchdog(sock);
+    },
+    { timezone: TIMEZONE }
+  );
+
   // Daily standup: 8:00 AM every day in configured timezone
   cron.schedule(
     '0 8 * * *',
@@ -219,6 +278,7 @@ export function startScheduler(getSocket) {
   );
 
   console.log(`[Scheduler] ✅ Jobs started (timezone: ${TIMEZONE})`);
+  console.log('  • Due Reminder Watchdog → every minute (* * * * *)');
   console.log('  • Daily Standup → 8:00 AM (daily)');
   console.log('  • Hourly Watchdog → every :00');
   console.log('  • Maintenance Pruning → 3:00 AM (>= 75 days retention)');

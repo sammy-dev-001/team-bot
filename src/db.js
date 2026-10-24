@@ -8,6 +8,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import 'dotenv/config';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.join(__dirname, '..', 'team_bot.db');
@@ -17,6 +18,54 @@ const db = new Database(DB_PATH);
 // Enable WAL mode for better concurrent read performance
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+
+// ─── Timezone Helpers ────────────────────────────────────────────────────────
+
+/**
+ * Returns current timestamp formatted as "YYYY-MM-DD HH:MM:SS"
+ * in the configured team timezone (defaults to Africa/Lagos).
+ */
+export function getNow() {
+  const tz = process.env.TIMEZONE || 'Africa/Lagos';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+
+  const p = {};
+  for (const { type, value } of parts) p[type] = value;
+  const hour = p.hour === '24' ? '00' : p.hour;
+  return `${p.year}-${p.month}-${p.day} ${hour}:${p.minute}:${p.second}`;
+}
+
+/**
+ * Returns relative timestamp in configured timezone offset by hoursDelta / daysDelta.
+ */
+export function getRelativeTime(hoursDelta = 0, daysDelta = 0) {
+  const tz = process.env.TIMEZONE || 'Africa/Lagos';
+  const target = new Date(Date.now() + hoursDelta * 3600000 + daysDelta * 86400000);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(target);
+
+  const p = {};
+  for (const { type, value } of parts) p[type] = value;
+  const hour = p.hour === '24' ? '00' : p.hour;
+  return `${p.year}-${p.month}-${p.day} ${hour}:${p.minute}:${p.second}`;
+}
 
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
@@ -80,9 +129,14 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_deadlines_due ON deadlines(due_date);
 `);
 
-// Safe migration for existing databases missing notified_24h on tasks
+// Safe migration for existing databases missing notified_24h or notified_due on tasks
 try {
   db.exec(`ALTER TABLE tasks ADD COLUMN notified_24h INTEGER DEFAULT 0;`);
+} catch (e) {
+  // Column already exists, ignore
+}
+try {
+  db.exec(`ALTER TABLE tasks ADD COLUMN notified_due INTEGER DEFAULT 0;`);
 } catch (e) {
   // Column already exists, ignore
 }
@@ -106,6 +160,7 @@ export function ensureMemberExists(jid, name) {
  */
 export function upsertMember({ jid, name, aliases, role, skills, bio_notes }) {
   const existing = db.prepare('SELECT * FROM team_members WHERE jid = ?').get(jid);
+  const now = getNow();
   if (existing) {
     db.prepare(`
       UPDATE team_members SET
@@ -114,14 +169,14 @@ export function upsertMember({ jid, name, aliases, role, skills, bio_notes }) {
         role      = COALESCE(NULLIF(?, ''), role),
         skills    = COALESCE(NULLIF(?, ''), skills),
         bio_notes = COALESCE(NULLIF(?, ''), bio_notes),
-        updated_at = datetime('now')
+        updated_at = ?
       WHERE jid = ?
-    `).run(name, aliases, role, skills, bio_notes, jid);
+    `).run(name, aliases, role, skills, bio_notes, now, jid);
   } else {
     db.prepare(`
-      INSERT INTO team_members (jid, name, aliases, role, skills, bio_notes)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(jid, name || jid.split('@')[0], aliases || '', role || '', skills || '', bio_notes || '');
+      INSERT INTO team_members (jid, name, aliases, role, skills, bio_notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(jid, name || jid.split('@')[0], aliases || '', role || '', skills || '', bio_notes || '', now);
   }
   return db.prepare('SELECT * FROM team_members WHERE jid = ?').get(jid);
 }
@@ -157,16 +212,18 @@ export function isMemberRegistered(jid) {
 
 /** Create a new task. */
 export function createTask({ title, description, assigned_to_jid, assigned_to_name, project_name, due_date }) {
+  const now = getNow();
   const info = db.prepare(`
-    INSERT INTO tasks (title, description, assigned_to_jid, assigned_to_name, project_name, due_date)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (title, description, assigned_to_jid, assigned_to_name, project_name, due_date, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
     title,
     description || '',
     assigned_to_jid || '',
     assigned_to_name || '',
     project_name || '',
-    due_date || ''
+    due_date || '',
+    now
   );
   return db.prepare('SELECT * FROM tasks WHERE id = ?').get(info.lastInsertRowid);
 }
@@ -217,15 +274,17 @@ export function getOpenTasks() {
 /** Get tasks due within the next N hours, filtering by notification flag. */
 export function getTasksDueSoon(withinHours = 24, flagField = 'notified_24h') {
   const safeFlag = flagField === 'notified_24h' ? 'notified_24h' : 'notified_24h';
+  const now = getNow();
+  const future = getRelativeTime(withinHours);
   return db.prepare(`
     SELECT * FROM tasks
     WHERE status NOT IN ('done')
       AND due_date != ''
-      AND datetime(due_date) <= datetime('now', '+' || ? || ' hours')
-      AND datetime(due_date) >= datetime('now')
+      AND datetime(due_date) <= datetime(?)
+      AND datetime(due_date) >= datetime(?)
       AND ${safeFlag} = 0
     ORDER BY datetime(due_date) ASC
-  `).all(withinHours);
+  `).all(future, now);
 }
 
 /** Mark a task's notification flag. */
@@ -234,25 +293,45 @@ export function markTaskNotified(id, flagField = 'notified_24h') {
   db.prepare(`UPDATE tasks SET ${safeFlag} = 1 WHERE id = ?`).run(id);
 }
 
+/** Get tasks that have reached or passed their due date and haven't received a due notification yet. */
+export function getTasksDueNow() {
+  const now = getNow();
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE status NOT IN ('done')
+      AND due_date != ''
+      AND datetime(due_date) <= datetime(?)
+      AND (notified_due = 0 OR notified_due IS NULL)
+    ORDER BY datetime(due_date) ASC
+  `).all(now);
+}
+
+/** Mark a task as notified for its due time. */
+export function markTaskDueNotified(id) {
+  db.prepare(`UPDATE tasks SET notified_due = 1 WHERE id = ?`).run(id);
+}
+
 // ─── deadlines ────────────────────────────────────────────────────────────────
 
 /** Add a new deadline. */
 export function addDeadline({ title, category, due_date, description }) {
+  const now = getNow();
   const info = db.prepare(`
-    INSERT INTO deadlines (title, category, due_date, description)
-    VALUES (?, ?, ?, ?)
-  `).run(title, category || 'project', due_date, description || '');
+    INSERT INTO deadlines (title, category, due_date, description, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(title, category || 'project', due_date, description || '', now);
   return db.prepare('SELECT * FROM deadlines WHERE id = ?').get(info.lastInsertRowid);
 }
 
 /** List deadlines with optional upcoming filter. */
 export function listDeadlines({ upcomingOnly = true } = {}) {
   if (upcomingOnly) {
+    const now = getNow();
     return db.prepare(`
       SELECT * FROM deadlines
-      WHERE datetime(due_date) >= datetime('now')
+      WHERE datetime(due_date) >= datetime(?)
       ORDER BY datetime(due_date) ASC
-    `).all();
+    `).all(now);
   }
   return db.prepare('SELECT * FROM deadlines ORDER BY datetime(due_date) ASC').all();
 }
@@ -267,24 +346,27 @@ export function deleteDeadline(id) {
 
 /** Get all upcoming (future) deadlines ordered soonest first. */
 export function getUpcomingDeadlines() {
+  const now = getNow();
   return db.prepare(`
     SELECT * FROM deadlines
-    WHERE datetime(due_date) >= datetime('now')
+    WHERE datetime(due_date) >= datetime(?)
     ORDER BY datetime(due_date) ASC
-  `).all();
+  `).all(now);
 }
 
 /** Get deadlines due within N hours, filtering by notification flag. */
 export function getDeadlinesDueSoon(withinHours = 24, flagField = 'notified_24h') {
   const validFlags = ['notified_24h', 'notified_1h'];
   const safeFlag = validFlags.includes(flagField) ? flagField : 'notified_24h';
+  const now = getNow();
+  const future = getRelativeTime(withinHours);
   return db.prepare(`
     SELECT * FROM deadlines
-    WHERE datetime(due_date) >= datetime('now')
-      AND datetime(due_date) <= datetime('now', '+' || ? || ' hours')
+    WHERE datetime(due_date) >= datetime(?)
+      AND datetime(due_date) <= datetime(?)
       AND ${safeFlag} = 0
     ORDER BY datetime(due_date) ASC
-  `).all(withinHours);
+  `).all(now, future);
 }
 
 /** Mark a deadline's notification flag so we don't spam. */
@@ -298,10 +380,11 @@ export function markDeadlineNotified(id, flagField = 'notified_24h') {
 
 /** Save a project note. */
 export function saveProjectNote({ project_name, note, added_by }) {
+  const now = getNow();
   const info = db.prepare(`
-    INSERT INTO project_notes (project_name, note, added_by)
-    VALUES (?, ?, ?)
-  `).run(project_name, note, added_by || '');
+    INSERT INTO project_notes (project_name, note, added_by, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(project_name, note, added_by || '', now);
   return db.prepare('SELECT * FROM project_notes WHERE id = ?').get(info.lastInsertRowid);
 }
 
@@ -330,10 +413,11 @@ export function searchProjectNotes(keyword = '') {
 
 /** Persist a group message. */
 export function logMessage({ group_jid, sender_name, sender_jid, content, has_media }) {
+  const now = getNow();
   db.prepare(`
-    INSERT INTO messages (group_jid, sender_name, sender_jid, content, has_media)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(group_jid, sender_name || '', sender_jid || '', content || '', has_media ? 1 : 0);
+    INSERT INTO messages (group_jid, sender_name, sender_jid, content, has_media, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(group_jid, sender_name || '', sender_jid || '', content || '', has_media ? 1 : 0, now);
 }
 
 /** Retrieve the last N messages for a group. */
@@ -348,21 +432,23 @@ export function getRecentMessages(group_jid, limit = 30) {
 
 /** Messages from the last N hours (used by the daily standup). */
 export function getMessagesSince(group_jid, hoursAgo = 24) {
+  const past = getRelativeTime(-hoursAgo);
   return db.prepare(`
     SELECT * FROM messages
     WHERE group_jid = ?
-      AND timestamp >= datetime('now', '-' || ? || ' hours')
+      AND timestamp >= ?
     ORDER BY timestamp ASC
-  `).all(group_jid, hoursAgo);
+  `).all(group_jid, past);
 }
 
 /** Delete messages older than specified days (minimum 75 days retention). */
 export function pruneOldMessages(days = 75) {
   const retentionDays = Math.max(75, Number(days) || 75);
+  const cutoff = getRelativeTime(0, -retentionDays);
   const info = db.prepare(`
     DELETE FROM messages
-    WHERE timestamp < datetime('now', '-' || ? || ' days')
-  `).run(retentionDays);
+    WHERE timestamp < ?
+  `).run(cutoff);
   return info.changes;
 }
 
