@@ -4,7 +4,8 @@
 //  Jobs:
 //   1. Daily 8:00 AM Standup Brief        (0 8 * * *)
 //   2. Hourly Deadline & Task Watchdog    (0 * * * *)
-//   3. Daily Message History Pruning      (0 3 * * *)
+//   3. Minute-level Due Task Watchdog     (* * * * *)
+//   4. Weekly Raw Chat Cleanup (Sunday)   (0 3 * * 0)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import cron from 'node-cron';
@@ -19,7 +20,9 @@ import {
   markTaskNotified,
   getTasksDueNow,
   markTaskDueNotified,
+  saveDailySummary,
   pruneOldMessages,
+  getNow,
 } from './db.js';
 import { generateStandupBrief } from './ai.js';
 import { sendSafeMessage } from './whatsapp.js';
@@ -76,6 +79,15 @@ async function runDailyStandup(sock) {
 
       await sendSafeMessage(sock, groupJid, brief, null, mentions);
       console.log(`[Scheduler] ✅ Daily standup sent to ${groupJid}`);
+
+      // Automatically save 8:00 AM Daily Brief into daily_summaries (kept forever)
+      try {
+        const todayDate = getNow().slice(0, 10);
+        saveDailySummary({ date: todayDate, summary_text: brief });
+        console.log(`[Scheduler] 💾 Saved 8:00 AM Daily Brief into daily_summaries for ${todayDate}`);
+      } catch (saveErr) {
+        console.error('[Scheduler] Failed to save daily summary:', saveErr.message);
+      }
     } catch (err) {
       console.error(`[Scheduler] ❌ Daily standup failed for ${groupJid}:`, err.message);
     }
@@ -260,18 +272,20 @@ export function startScheduler(getSocket) {
     { timezone: TIMEZONE }
   );
 
-  // Daily message retention pruning at 3:00 AM (keeps at least 75 days)
+  // Weekly raw chat log pruning at 3:00 AM every Sunday (keeps at least 90 days)
+  // Only prunes raw chat logs from messages; team_members, tasks, deadlines,
+  // project_notes, and daily_summaries are kept forever.
   cron.schedule(
-    '0 3 * * *',
+    '0 3 * * 0',
     () => {
       try {
-        const retentionDays = Math.max(75, Number(process.env.MESSAGE_RETENTION_DAYS) || 75);
+        const retentionDays = Math.max(90, Number(process.env.MESSAGE_RETENTION_DAYS) || 90);
         const pruned = pruneOldMessages(retentionDays);
         if (pruned > 0) {
-          console.log(`[Scheduler] 🧹 Pruned ${pruned} message(s) older than ${retentionDays} days.`);
+          console.log(`[Scheduler] 🧹 Weekly cleanup: pruned ${pruned} raw chat log(s) older than ${retentionDays} days.`);
         }
       } catch (err) {
-        console.error('[Scheduler] Message pruning error:', err.message);
+        console.error('[Scheduler] Weekly message pruning error:', err.message);
       }
     },
     { timezone: TIMEZONE }
@@ -281,5 +295,5 @@ export function startScheduler(getSocket) {
   console.log('  • Due Reminder Watchdog → every minute (* * * * *)');
   console.log('  • Daily Standup → 8:00 AM (daily)');
   console.log('  • Hourly Watchdog → every :00');
-  console.log('  • Maintenance Pruning → 3:00 AM (>= 75 days retention)');
+  console.log('  • Weekly Raw Chat Cleanup → 3:00 AM Sundays (weekly, >= 90 days retention)');
 }

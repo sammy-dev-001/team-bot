@@ -123,10 +123,19 @@ db.exec(`
     timestamp    TEXT DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS daily_summaries (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    date         TEXT NOT NULL,
+    summary_text TEXT NOT NULL,
+    created_at   TEXT DEFAULT ''
+  );
+
   -- Performance Indexes
   CREATE INDEX IF NOT EXISTS idx_messages_group_time ON messages(group_jid, timestamp);
+  CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
   CREATE INDEX IF NOT EXISTS idx_tasks_status_due ON tasks(status, due_date);
   CREATE INDEX IF NOT EXISTS idx_deadlines_due ON deadlines(due_date);
+  CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date);
 `);
 
 // Safe migration for existing databases missing notified_24h or notified_due on tasks
@@ -441,9 +450,112 @@ export function getMessagesSince(group_jid, hoursAgo = 24) {
   `).all(group_jid, past);
 }
 
-/** Delete messages older than specified days (minimum 75 days retention). */
-export function pruneOldMessages(days = 75) {
-  const retentionDays = Math.max(75, Number(days) || 75);
+// ─── daily_summaries ──────────────────────────────────────────────────────────
+
+/**
+ * Save a daily brief summary into daily_summaries.
+ * Daily summaries are stored permanently (never pruned).
+ */
+export function saveDailySummary({ date, summary_text }) {
+  const now = getNow();
+  const summaryDate = date || now.slice(0, 10);
+  const info = db.prepare(`
+    INSERT INTO daily_summaries (date, summary_text, created_at)
+    VALUES (?, ?, ?)
+  `).run(summaryDate, summary_text, now);
+  return db.prepare('SELECT * FROM daily_summaries WHERE id = ?').get(info.lastInsertRowid);
+}
+
+/** Get a daily summary by date (YYYY-MM-DD). */
+export function getDailySummary(date) {
+  return db.prepare('SELECT * FROM daily_summaries WHERE date = ? ORDER BY id DESC LIMIT 1').get(date);
+}
+
+/** Get recent daily summaries. */
+export function getRecentDailySummaries(limit = 14) {
+  return db.prepare('SELECT * FROM daily_summaries ORDER BY date DESC, id DESC LIMIT ?').all(limit);
+}
+
+// ─── 90-Day Unlimited Recall / Search ─────────────────────────────────────────
+
+/**
+ * Search raw messages and daily summaries over the past 90 days.
+ * Queries messages (by content, sender_name, timestamp) and daily_summaries (by summary_text, date).
+ *
+ * @param {object} [options]
+ * @param {string} [options.keyword]       - Text to search across chat messages and daily briefs
+ * @param {string} [options.sender_name]   - Filter chat messages by sender name
+ * @param {number} [options.days_ago_start]- Search window start (days ago, default: 90)
+ * @param {number} [options.days_ago_end]  - Search window end (days ago, default: 0)
+ */
+export function searchChatHistory({ keyword = '', sender_name = '', days_ago_start = 90, days_ago_end = 0 } = {}) {
+  const startDays = Math.max(1, Number(days_ago_start) || 90);
+  const endDays = Math.max(0, Number(days_ago_end) || 0);
+  const actualStartDays = Math.max(startDays, endDays);
+  const actualEndDays = Math.min(startDays, endDays);
+
+  const startTime = getRelativeTime(0, -actualStartDays);
+  const endTime = getRelativeTime(0, -actualEndDays);
+  const startDate = startTime.slice(0, 10);
+  const endDate = endTime.slice(0, 10);
+
+  // 1. Search messages within 90-day window
+  let messageSql = `
+    SELECT id, group_jid, sender_name, sender_jid, content, timestamp
+    FROM messages
+    WHERE timestamp >= ? AND timestamp <= ?
+  `;
+  const messageParams = [startTime, endTime];
+
+  if (keyword && keyword.trim()) {
+    messageSql += ` AND lower(content) LIKE ?`;
+    messageParams.push(`%${keyword.trim().toLowerCase()}%`);
+  }
+
+  if (sender_name && sender_name.trim()) {
+    messageSql += ` AND lower(sender_name) LIKE ?`;
+    messageParams.push(`%${sender_name.trim().toLowerCase()}%`);
+  }
+
+  messageSql += ` ORDER BY timestamp DESC LIMIT 50`;
+  const messages = db.prepare(messageSql).all(...messageParams);
+
+  // 2. Search daily_summaries
+  let summarySql = `
+    SELECT id, date, summary_text, created_at
+    FROM daily_summaries
+    WHERE date >= ? AND date <= ?
+  `;
+  const summaryParams = [startDate, endDate];
+
+  if (keyword && keyword.trim()) {
+    summarySql += ` AND lower(summary_text) LIKE ?`;
+    summaryParams.push(`%${keyword.trim().toLowerCase()}%`);
+  }
+
+  summarySql += ` ORDER BY date DESC LIMIT 15`;
+  const daily_summaries = db.prepare(summarySql).all(...summaryParams);
+
+  return {
+    time_window: {
+      from: startTime,
+      to: endTime,
+      days_window: actualStartDays - actualEndDays,
+    },
+    message_count: messages.length,
+    summary_count: daily_summaries.length,
+    messages,
+    daily_summaries,
+  };
+}
+
+/**
+ * Delete raw chat logs older than specified days (minimum 90 days retention).
+ * Weekly cleanup only prunes raw chat logs from messages; team_members, tasks,
+ * deadlines, project_notes, and daily_summaries are kept forever.
+ */
+export function pruneOldMessages(days = 90) {
+  const retentionDays = Math.max(90, Number(days) || 90);
   const cutoff = getRelativeTime(0, -retentionDays);
   const info = db.prepare(`
     DELETE FROM messages

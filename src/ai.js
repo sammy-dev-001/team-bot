@@ -23,6 +23,7 @@ import {
   deleteDeadline,
   saveProjectNote,
   searchProjectNotes,
+  searchChatHistory,
   getNow,
 } from './db.js';
 
@@ -185,6 +186,33 @@ const TOOLS = [
           required: [],
         },
       },
+      {
+        name: 'search_chat_history',
+        description:
+          'Search raw messages and daily brief summaries from up to 90 days ago. Call this whenever a teammate asks about an older conversation, link, decision, or event from up to 90 days ago.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            keyword: {
+              type: 'STRING',
+              description: 'Word or phrase to search for across chat messages and daily standup briefs (e.g. "auth", "Supabase", "figma", "budget")',
+            },
+            sender_name: {
+              type: 'STRING',
+              description: 'Filter chat messages by the sender name (e.g. "Sammy", "David")',
+            },
+            days_ago_start: {
+              type: 'NUMBER',
+              description: 'Start of search window in days ago (e.g. 90 for up to 90 days ago, 30 for 1 month ago). Defaults to 90.',
+            },
+            days_ago_end: {
+              type: 'NUMBER',
+              description: 'End of search window in days ago (e.g. 0 for today, 7 for 1 week ago). Defaults to 0.',
+            },
+          },
+          required: [],
+        },
+      },
     ],
   },
 ];
@@ -243,6 +271,10 @@ function executeTool(name, args) {
     case 'get_project_notes': {
       const notes = searchProjectNotes(args.keyword || '');
       return { success: true, notes, count: notes.length };
+    }
+    case 'search_chat_history': {
+      const results = searchChatHistory(args);
+      return { success: true, ...results };
     }
     default:
       return { success: false, error: `Unknown tool: ${name}` };
@@ -322,10 +354,14 @@ ${deadlineLines}
 ═══ RECENT GROUP MESSAGES (last 30) ═══
 ${historyLines}
 
+═══ 90-DAY MEMORY & HISTORICAL RECALL ═══
+You have access to the last 30 messages in immediate context, plus the permanent Team Directory, Tasks, and Project Notes. Whenever a teammate asks about an older conversation, link, decision, or event from up to 90 days ago, ALWAYS call search_chat_history before answering.
+
 ═══ YOUR PERSONA & VOICE (BALANCED NAIJA TECH VIBE) ═══
 • Tone: Sharp, pragmatic, articulate, and friendly. You talk like a real Nigerian software engineer (think Lagos tech ecosystem): clear professional English as the base, naturally seasoned with subtle Nigerian slang and colloquialisms ("omo", "abeg", "no wahala", "sharp sharp", "no dulling", "we move", "make we...").
 • DO NOT OVERDO IT: Do NOT write caricature or forced heavy broken pidgin. Keep technical advice, architecture critiques, code debugging, and task breakdowns clean, rigorous, and easy to read. Let the Nigerian warmth feel effortless and natural.
 • Formatting: Keep responses concise and scannable. Use WhatsApp styling: *bold*, _italics_, bullet points (•).
+• 90-Day Unlimited Recall: You have access to the last 30 messages in immediate context, plus the permanent Team Directory, Tasks, and Project Notes. Whenever a teammate asks about an older conversation, link, decision, or event from up to 90 days ago, ALWAYS call search_chat_history before answering.
 • Tagging: In group chats when assigning tasks, use @phonenumber format (e.g. @2348012345678) only for valid phone number JIDs. In private 1-on-1 DMs, do NOT tag the user with @phone or @lid at all—address them naturally by name (e.g. "Sammy"). Never convert internal WhatsApp IDs ending in @lid into phone numbers or international dialing codes (e.g. a JID like 243...@lid is an internal WhatsApp local privacy ID, NOT a phone number or Democratic Republic of Congo country code).
 • Team awareness: You know every member's role and skills from the Team Directory. When tasks arise, suggest or assign them to the best-suited teammate.
 • Deadlines & Flyers: If a shared message or flyer contains a hackathon deadline or milestone date, proactively call add_deadline to save it.

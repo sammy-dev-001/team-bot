@@ -17,9 +17,10 @@ An AI-powered WhatsApp teammate engineered for agile software teams, hackathon s
 * **Dual-Path Routing:** Instant deterministic slash commands (`/tasks`, `/deadlines`, `/notes`, `/status`, `/help`) return in `<30ms` with zero AI cost.
 * **Autonomous Tool Loop:** Gemini reads and writes team members, assigns tasks to the best-suited person based on their skills, and manages project milestones.
 * **Multimodal Intelligence:** Analyzes UI mockups, extracts deadlines from event flyers, parses documents/PDFs, and listens to WhatsApp voice notes.
-* **Daily 8:00 AM Standup:** Automatically digests the past 24 hours of conversation, open tasks, and approaching deadlines into a crisp WhatsApp markdown brief.
-* **Hourly Anti-Spam Watchdog:** Alerts the team 24h and 1h before deadlines and tasks without message spam.
-* **75-Day History Retention:** Auto-indexes SQLite messages and prunes chat logs older than 75 days to maintain high performance.
+* **Daily 8:00 AM Standup:** Automatically digests the past 24 hours of conversation, open tasks, and approaching deadlines into a crisp WhatsApp markdown brief and saves it permanently to `daily_summaries`.
+* **Hourly & Minute Watchdog:** Alerts the team 24h and 1h before deadlines and tasks, with minute-by-minute exact due-time reminders directly to assignees.
+* **90-Day Unlimited Memory:** SQLite keeps raw chat logs for 90 days with weekly Sunday pruning, while team members, tasks, deadlines, project notes, and daily summaries are preserved forever.
+* **On-Demand 90-Day Recall:** The `search_chat_history` tool lets the AI instantly search discussions, links, decisions, and past standups up to 90 days back.
 * **Anti-Ban Human Delays:** Random 1.5–3s typing simulation with composing presence before every send.
 
 ---
@@ -31,10 +32,10 @@ team-bot/
 ├── src/
 │   ├── index.js        # Entry point — bootstraps connection & scheduler
 │   ├── whatsapp.js     # Baileys WhatsApp client, anti-ban presence, DM auth
-│   ├── db.js           # SQLite schema, indexes, CRUD helpers, 75-day pruning
+│   ├── db.js           # SQLite schema, indexes, CRUD helpers, 90-day memory & recall
 │   ├── ai.js           # Gemini AI brain, multimodal pipeline, function calling
 │   ├── handler.js      # Dual-path router: instant slash commands & AI reasoning
-│   └── scheduler.js    # node-cron: 8 AM standup, hourly watchdog, 3 AM cleanup
+│   └── scheduler.js    # node-cron: 8 AM standup, minute/hourly watchdog, weekly cleanup
 ├── auth_info/          # Auto-created — multi-file Baileys session (git-ignored)
 ├── team_bot.db         # Auto-created — embedded SQLite database (git-ignored)
 ├── .env                # Secret environment variables (git-ignored)
@@ -86,8 +87,8 @@ BOT_NAME=TeamBot
 # Local timezone
 TIMEZONE=Africa/Lagos
 
-# History retention (minimum 75 days)
-MESSAGE_RETENTION_DAYS=75
+# Raw chat history retention (minimum 90 days, weekly cleanup)
+MESSAGE_RETENTION_DAYS=90
 ```
 
 ### 3. First Run & Group Discovery

@@ -69,15 +69,16 @@ TeamBot is built with a lightweight, zero-cloud-overhead architecture designed t
                     │ • tasks (assignees, status, due)     │
                     │ • deadlines (hackathons, events)     │
                     │ • project_notes (architecture)       │
-                    │ • messages (75-day retention)        │
+                    │ • daily_summaries (archived briefs)  │
+                    │ • messages (90-day retention)        │
                     └──────────────────┬───────────────────┘
                                        │
                                        ▼
                     ┌──────────────────────────────────────┐
                     │     node-cron Automated Services     │
                     │ • 8:00 AM Daily Morning Standup      │
-                    │ • Hourly Anti-Spam Watchdog Alerts   │
-                    │ • 3:00 AM 75-Day History Pruning     │
+                    │ • Hourly & Minute Watchdog Alerts    │
+                    │ • Weekly 90-Day Raw Chat Cleanup     │
                     └──────────────────────────────────────┘
 ```
 
@@ -97,15 +98,22 @@ Gemini doesn't just generate text; it acts as an agent with full CRUD access to 
 * `update_task_status` & `delete_task` — Manages Kanban-style task lifecycles.
 * `add_deadline` & `list_deadlines` — Keeps track of hackathons, demo days, and sprint milestones.
 * `save_project_note` & `get_project_notes` — Permanent memory for architecture decisions and repository links.
+* `search_chat_history` — On-demand 90-day recall across raw chat logs and archived daily standup briefs.
 
-### 3. Voice Notes & Multimodal Understanding
+### 3. 90-Day Unlimited Memory & Archival
+* **90-Day Raw Chat Buffer:** All incoming group and DM messages are retained in SQLite for at least 90 days, indexed by timestamp and group JID.
+* **Weekly Automated Cleanup:** A weekly cron job (Sundays at 3:00 AM) safely prunes only raw chat logs older than 90 days.
+* **Permanent Data Persistence:** Team directory, tasks, deadlines, project notes, and archived 8:00 AM daily briefs are never deleted.
+* **Deep On-Demand Recall:** While immediate context holds the last 30 messages, the AI seamlessly searches the full 90-day archive when asked about older links, decisions, announcements, or discussions.
+
+### 4. Voice Notes & Multimodal Understanding
 Modern teams communicate via voice memos and screenshots. TeamBot handles:
 * **Voice Notes (PTT):** Transcribes audio voice notes and extracts action items or answers queries.
 * **Hackathon Flyers & Posters:** Automatically extracts event dates and saves deadlines to the database.
 * **UI Mockups & Architecture Diagrams:** Provides actionable engineering critique and task breakdowns.
 * **Documents:** Analyzes PRDs, API specs, and shared code snippets.
 
-### 4. Organic Engineering Teammate
+### 5. Organic Engineering Teammate
 Rather than remaining silent until tagged, TeamBot intelligently listens for technical cues (error logs, architecture debates, performance bottlenecks). Using a 15-minute / 15-message cooldown, it chimes in when it can add genuine engineering value.
 
 ---
