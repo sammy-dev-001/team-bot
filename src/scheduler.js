@@ -45,16 +45,35 @@ function getTargetGroups() {
  * Format a task into a human-readable WhatsApp line with a @mention.
  */
 function formatTask(t) {
-  const mention = t.assigned_to_jid ? `@${t.assigned_to_jid.split('@')[0]}` : 'Unassigned';
-  const due = t.due_date ? `due ${t.due_date.slice(0, 10)}` : 'no due date';
-  return `• #${t.id} *${t.title}* → ${mention} | _${t.status}_ | ${due}`;
+  // Use display name first. Only use @mention if JID is a real phone number (@s.whatsapp.net).
+  // Never prepend @ to an internal @lid ID (which WhatsApp turns into a Congolese +243 number).
+  let assignee = t.assigned_to_name || 'Unassigned';
+  if (t.assigned_to_jid && t.assigned_to_jid.endsWith('@s.whatsapp.net')) {
+    assignee = `@${t.assigned_to_jid.split('@')[0]}`;
+  }
+
+  // Preserve full date and time if present
+  let due = 'no due date';
+  if (t.due_date) {
+    const cleanDue = t.due_date.replace('T', ' ');
+    due = cleanDue.includes(':') ? `due ${cleanDue}` : `due ${cleanDue.slice(0, 10)}`;
+  }
+
+  return `• #${t.id} *${t.title}* → ${assignee} | _${t.status}_ | ${due}`;
 }
 
 /**
  * Extract all unique member JIDs from a list of tasks (for the mentions array).
+ * Only includes real phone numbers ending in @s.whatsapp.net to avoid corrupted mentions.
  */
 function extractTaskMentions(tasks) {
-  return [...new Set(tasks.map((t) => t.assigned_to_jid).filter(Boolean))];
+  return [
+    ...new Set(
+      tasks
+        .map((t) => t.assigned_to_jid)
+        .filter((jid) => jid && jid.endsWith('@s.whatsapp.net'))
+    ),
+  ];
 }
 
 // ─── Job 1: Daily Standup Brief @ 8:00 AM ────────────────────────────────────
@@ -166,17 +185,9 @@ async function runWatchdog(sock) {
         `⏰ *Tasks Due Soon (Next 24h)*\n\n${lines}\n\n` +
         `Let's get these over the line today team! 💪`;
 
+      // Broadcast the 24h group summary to configured team groups
       for (const groupJid of groups) {
         await sendSafeMessage(sock, groupJid, alertText, null, mentions);
-      }
-
-      // If no group is configured (e.g. DM testing), notify assignee directly
-      if (groups.length === 0) {
-        for (const t of tasksDue) {
-          if (t.assigned_to_jid) {
-            await sendSafeMessage(sock, t.assigned_to_jid, alertText);
-          }
-        }
       }
 
       // Mark tasks as notified so the watchdog doesn't spam every hour
@@ -184,7 +195,9 @@ async function runWatchdog(sock) {
         markTaskNotified(t.id, 'notified_24h');
       }
 
-      console.log(`[Scheduler] ⏰ Task due-soon alert sent (${tasksDue.length} task(s))`);
+      if (groups.length > 0) {
+        console.log(`[Scheduler] ⏰ Task due-soon alert sent (${tasksDue.length} task(s))`);
+      }
     }
   } catch (err) {
     console.error('[Scheduler] Task watchdog error:', err.message);

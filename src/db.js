@@ -290,7 +290,7 @@ export function getTasksDueSoon(withinHours = 24, flagField = 'notified_24h') {
     WHERE status NOT IN ('done')
       AND due_date != ''
       AND datetime(due_date) <= datetime(?)
-      AND datetime(due_date) >= datetime(?)
+      AND datetime(due_date) > datetime(?)
       AND ${safeFlag} = 0
     ORDER BY datetime(due_date) ASC
   `).all(future, now);

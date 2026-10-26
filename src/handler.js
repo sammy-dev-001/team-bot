@@ -341,16 +341,23 @@ export async function handleMessage(sock, msg) {
     }
     const taskLines = tasks
       .map((t) => {
-        const assignee = t.assigned_to_jid
-          ? `@${t.assigned_to_jid.split('@')[0]}`
-          : t.assigned_to_name || 'Unassigned';
-        const due = t.due_date ? ` | 📅 ${t.due_date.slice(0, 10)}` : '';
+        let assignee = t.assigned_to_name || 'Unassigned';
+        if (t.assigned_to_jid && t.assigned_to_jid.endsWith('@s.whatsapp.net')) {
+          assignee = `@${t.assigned_to_jid.split('@')[0]}`;
+        }
+        let due = '';
+        if (t.due_date) {
+          const cleanDue = t.due_date.replace('T', ' ');
+          due = cleanDue.includes(':') ? ` | 📅 ${cleanDue}` : ` | 📅 ${cleanDue.slice(0, 10)}`;
+        }
         const proj = t.project_name ? `[${t.project_name}] ` : '';
         return `• *#${t.id}* ${proj}*${t.title}*\n  ↳ Assignee: ${assignee} | Status: _${t.status}_${due}`;
       })
       .join('\n\n');
 
-    const mentions = tasks.map((t) => t.assigned_to_jid).filter(Boolean);
+    const mentions = tasks
+      .map((t) => t.assigned_to_jid)
+      .filter((jid) => jid && jid.endsWith('@s.whatsapp.net'));
     const reply = `📋 *Active Tasks (${tasks.length})*\n\n${taskLines}\n\n_Tag @bot to assign, reassign, or update task status._`;
     await sendSafeMessage(sock, remoteJid, reply, msg, mentions);
     return;

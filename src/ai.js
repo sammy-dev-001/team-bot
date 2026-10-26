@@ -527,7 +527,12 @@ export async function generateStandupBrief(groupJid, last24hMessages, openTasks,
 
   const taskSummary = openTasks.length
     ? openTasks
-        .map((t) => `• #${t.id} "${t.title}" → @${t.assigned_to_jid?.split('@')[0]} (${t.status}) Due: ${t.due_date || 'N/A'}`)
+        .map((t) => {
+          const assignee = (t.assigned_to_jid && t.assigned_to_jid.endsWith('@s.whatsapp.net'))
+            ? `@${t.assigned_to_jid.split('@')[0]}`
+            : (t.assigned_to_name || 'Unassigned');
+          return `• #${t.id} "${t.title}" → ${assignee} (${t.status}) Due: ${t.due_date || 'N/A'}`;
+        })
         .join('\n')
     : 'No open tasks.';
 
