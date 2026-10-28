@@ -14,7 +14,7 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "@whiskeysockets/baileys": "^6.7.16",
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "^12.11.1",
     "dotenv": "^16.5.0",
     "node-cron": "^3.0.3",
     "pino": "^9.7.0",
@@ -25,12 +25,8 @@
   },
   "allowScripts": {
     "better-sqlite3": true,
-    "better-sqlite3@11.10.0": true,
     "@whiskeysockets/baileys": true,
-    "@whiskeysockets/baileys@6.7.24": true,
     "@google/genai": true,
-    "@google/genai@1.52.0": true,
-    "protobufjs": true,
-    "protobufjs@7.6.6": true
+    "protobufjs": true
   }
 }
