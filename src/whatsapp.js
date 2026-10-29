@@ -295,28 +295,13 @@ export async function connectToWhatsApp() {
       // ── Private 1-on-1 Direct Message (DM) Support & Auth Check ────────────
       if (!isGroup) {
         const senderJid = remoteJid;
-        const adminJids = (process.env.ADMIN_JIDS || '')
-          .split(',')
-          .map((j) => j.trim())
-          .filter(Boolean);
-
-        let isAuthorized = false;
-        if (adminJids.length > 0) {
-          const senderNum = senderJid?.split('@')[0];
-          isAuthorized =
-            adminJids.some(
-              (a) => a === senderJid || a === senderNum || `${a}@s.whatsapp.net` === senderJid
-            ) ||
-            isChatAuthorized(rawRemoteJid) ||
-            isChatAuthorized(senderJid) ||
-            isActivationCommand;
-        } else {
-          // If no ADMIN_JIDS whitelist configured: all 1-on-1 DMs are welcomed!
-          isAuthorized = true;
-        }
+        const isAuthorized =
+          isChatAuthorized(rawRemoteJid) ||
+          isChatAuthorized(senderJid) ||
+          isActivationCommand;
 
         if (!isAuthorized) {
-          console.log(`[WhatsApp] ⛔ Unauthorized DM ignored from ${msg.pushName || senderJid}`);
+          console.log(`[WhatsApp] ⛔ Unactivated DM ignored from ${msg.pushName || senderJid} (send /start or /activate to begin)`);
           continue;
         }
 
