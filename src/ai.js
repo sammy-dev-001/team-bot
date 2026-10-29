@@ -45,7 +45,7 @@ const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const MODEL = GEMINI_MODEL;
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
@@ -884,6 +884,17 @@ async function askAIGemini(groupJid, systemPrompt, userMessage, mediaData, meta 
   };
 }
 
+function getGroqModels() {
+  return [
+    process.env.GROQ_MODEL,
+    'llama-3.1-8b-instant',
+    'llama-3.3-70b-versatile',
+    'llama3-70b-8192',
+    'llama3-8b-8192',
+    'mixtral-8x7b-32768',
+  ].filter((m, i, arr) => m && arr.indexOf(m) === i);
+}
+
 // ─── Main AI Entrypoint with Multi-Provider Failover ──────────────────────────
 
 /**
@@ -897,20 +908,24 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
 
   // 1. If Groq is primary or auto-selected
   if (provider === 'groq') {
-    try {
-      return await askAIOpenAI({
-        endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-        apiKey: GROQ_API_KEY,
-        model: GROQ_MODEL,
-        systemPrompt,
-        userMessage,
-        mediaData,
-        meta: { ...meta, chatJid: groupJid },
-      });
-    } catch (err) {
-      console.warn('[AI] Groq failed, attempting fallback...', err.message);
-      if (!GEMINI_API_KEY && !OPENROUTER_API_KEY) throw err;
+    const models = getGroqModels();
+    for (const model of models) {
+      try {
+        return await askAIOpenAI({
+          endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+          apiKey: GROQ_API_KEY,
+          model,
+          systemPrompt,
+          userMessage,
+          mediaData,
+          meta: { ...meta, chatJid: groupJid },
+        });
+      } catch (err) {
+        console.warn(`[AI] Groq model ${model} failed (${err.message}). Trying next Groq model...`);
+      }
     }
+    console.warn('[AI] All Groq models failed, attempting fallback to Gemini/OpenRouter...');
+    if (!GEMINI_API_KEY && !OPENROUTER_API_KEY) throw new Error('All Groq models failed.');
   }
 
   // 2. If OpenRouter is primary or auto-selected
@@ -950,16 +965,23 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
       // Seamless failover if Gemini hits daily quota:
       if (isQuota) {
         if (GROQ_API_KEY) {
-          console.log('[AI] 🔄 Gemini quota reached. Seamlessly failing over to Groq Llama 3.3...');
-          return await askAIOpenAI({
-            endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-            apiKey: GROQ_API_KEY,
-            model: GROQ_MODEL,
-            systemPrompt,
-            userMessage,
-            mediaData,
-            meta: { ...meta, chatJid: groupJid },
-          });
+          console.log('[AI] 🔄 Gemini quota reached. Seamlessly failing over to Groq...');
+          const models = getGroqModels();
+          for (const model of models) {
+            try {
+              return await askAIOpenAI({
+                endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+                apiKey: GROQ_API_KEY,
+                model,
+                systemPrompt,
+                userMessage,
+                mediaData,
+                meta: { ...meta, chatJid: groupJid },
+              });
+            } catch (gErr) {
+              console.warn(`[AI] Groq failover model ${model} failed (${gErr.message}). Trying next...`);
+            }
+          }
         }
         if (OPENROUTER_API_KEY) {
           console.log('[AI] 🔄 Gemini quota reached. Seamlessly failing over to OpenRouter...');
@@ -992,23 +1014,26 @@ async function callAICompletion({ systemPrompt, prompt, temperature = 0.7, maxTo
   const provider = resolveActiveProvider(false);
 
   if (provider === 'groq' || (provider === 'auto' && GROQ_API_KEY)) {
-    try {
-      const data = await callOpenAICompatible({
-        endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-        apiKey: GROQ_API_KEY,
-        model: GROQ_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt },
-        ],
-        temperature,
-        max_tokens: maxTokens,
-      });
-      return data.choices?.[0]?.message?.content || null;
-    } catch (err) {
-      console.warn('[AI] Groq text completion failed:', err.message);
-      if (!GEMINI_API_KEY && !OPENROUTER_API_KEY) throw err;
+    const models = getGroqModels();
+    for (const model of models) {
+      try {
+        const data = await callOpenAICompatible({
+          endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+          apiKey: GROQ_API_KEY,
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt },
+          ],
+          temperature,
+          max_tokens: maxTokens,
+        });
+        return data.choices?.[0]?.message?.content || null;
+      } catch (err) {
+        console.warn(`[AI] Groq text completion model ${model} failed (${err.message}).`);
+      }
     }
+    if (!GEMINI_API_KEY && !OPENROUTER_API_KEY) throw new Error('All Groq completion models failed.');
   }
 
   if (provider === 'openrouter' || (provider === 'auto' && OPENROUTER_API_KEY)) {
