@@ -1022,6 +1022,7 @@ export async function handleMessage(sock, msg) {
 
   const botNormalizedJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
   const botPhone = botNormalizedJid ? botNormalizedJid.split('@')[0] : null;
+  const botJid = botNormalizedJid;
   // In private 1-on-1 DMs, always trigger a response
   const directTrigger = isDM || isDirectTrigger(msg, sock);
   // In groups, untagged stickers do not trigger unsolicited chime-ins (to avoid spamming meme reactions)

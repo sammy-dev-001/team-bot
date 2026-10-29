@@ -884,15 +884,69 @@ async function askAIGemini(groupJid, systemPrompt, userMessage, mediaData, meta 
   };
 }
 
-function getGroqModels() {
-  return [
+let cachedGroqModels = null;
+let lastGroqFetch = 0;
+
+/**
+ * Dynamically discovers the active models available to this specific Groq API key.
+ */
+async function getGroqModels(apiKey) {
+  if (cachedGroqModels && cachedGroqModels.length > 0 && Date.now() - lastGroqFetch < 10 * 60 * 1000) {
+    return cachedGroqModels;
+  }
+
+  const hardcoded = [
     process.env.GROQ_MODEL,
     'llama-3.1-8b-instant',
     'llama-3.3-70b-versatile',
-    'llama3-70b-8192',
-    'llama3-8b-8192',
-    'mixtral-8x7b-32768',
-  ].filter((m, i, arr) => m && arr.indexOf(m) === i);
+    'gemma2-9b-it',
+    'llama-3.2-11b-vision-preview',
+    'llama-3.2-3b-preview',
+    'llama-3.2-1b-preview',
+    'qwen/qwen3.8-27b',
+  ].filter(Boolean);
+
+  if (!apiKey) return hardcoded;
+
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const ids = (data.data || []).map((m) => m.id);
+      // Filter out audio (whisper), guard/safeguard, and embed models
+      const chatModels = ids.filter(
+        (id) =>
+          !id.includes('whisper') &&
+          !id.includes('guard') &&
+          !id.includes('safeguard') &&
+          !id.includes('embed')
+      );
+
+      if (chatModels.length > 0) {
+        const customModel = process.env.GROQ_MODEL;
+        const prioritized = customModel && chatModels.includes(customModel)
+          ? [customModel, ...chatModels.filter((m) => m !== customModel)]
+          : chatModels;
+
+        cachedGroqModels = prioritized;
+        lastGroqFetch = Date.now();
+        console.log('[AI] 🔍 Auto-discovered active Groq models for your API key:', prioritized);
+        return prioritized;
+      }
+    } else {
+      const errText = await res.text();
+      console.warn('[AI] Notice from Groq /models endpoint:', res.status, errText);
+    }
+  } catch (err) {
+    console.warn('[AI] Could not auto-discover Groq models:', err.message);
+  }
+
+  return hardcoded;
 }
 
 // ─── Main AI Entrypoint with Multi-Provider Failover ──────────────────────────
@@ -908,7 +962,7 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
 
   // 1. If Groq is primary or auto-selected
   if (provider === 'groq') {
-    const models = getGroqModels();
+    const models = await getGroqModels(GROQ_API_KEY);
     for (const model of models) {
       try {
         return await askAIOpenAI({
@@ -966,7 +1020,7 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
       if (isQuota) {
         if (GROQ_API_KEY) {
           console.log('[AI] 🔄 Gemini quota reached. Seamlessly failing over to Groq...');
-          const models = getGroqModels();
+          const models = await getGroqModels(GROQ_API_KEY);
           for (const model of models) {
             try {
               return await askAIOpenAI({
@@ -1014,7 +1068,7 @@ async function callAICompletion({ systemPrompt, prompt, temperature = 0.7, maxTo
   const provider = resolveActiveProvider(false);
 
   if (provider === 'groq' || (provider === 'auto' && GROQ_API_KEY)) {
-    const models = getGroqModels();
+    const models = await getGroqModels(GROQ_API_KEY);
     for (const model of models) {
       try {
         const data = await callOpenAICompatible({
