@@ -203,7 +203,14 @@ export async function connectToWhatsApp() {
           text.startsWith('/standup') ||
           text.startsWith('/status') ||
           text.startsWith('/ping') ||
-          text.startsWith('/help');
+          text.startsWith('/help') ||
+          text.startsWith('/mytasks') ||
+          text.startsWith('/done') ||
+          text.startsWith('/progress') ||
+          text.startsWith('/block') ||
+          text.startsWith('/assign') ||
+          text.startsWith('/overdue') ||
+          text.startsWith('/blocked');
 
         if (!isExplicitSelfCommand) continue;
       }

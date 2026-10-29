@@ -21,6 +21,14 @@ import {
   getAllMembers,
   getMessagesSince,
   getUpcomingDeadlines,
+  getTasksByMember,
+  getOverdueTasks,
+  getBlockedTasks,
+  updateTaskStatus,
+  reassignTask,
+  setTaskBlockReason,
+  findMemberByName,
+  getMember,
 } from './db.js';
 import { askAI, generateStandupBrief } from './ai.js';
 import { sendSafeMessage } from './whatsapp.js';
@@ -322,12 +330,19 @@ export async function handleMessage(sock, msg) {
       `• */notes [keyword]* — Search or view saved project notes\n` +
       `• */standup* — Generate an on-demand morning standup brief\n` +
       `• */status* or */ping* — View bot uptime & health metrics\n` +
-      `• */help* — Show this command menu\n\n` +
+      `• */mytasks* — Your personal task list (use in DM for privacy)\n` +
+      `• */overdue* — Show all overdue tasks\n` +
+      `• */blocked* — Show all blocked tasks\n\n` +
+      `*✅ Task Fast Commands:*\n` +
+      `• */done #5* — Mark task #5 as done\n` +
+      `• */progress #5* — Mark task #5 as in progress\n` +
+      `• */block #5 [reason]* — Mark task #5 as blocked\n` +
+      `• */assign #5 David* — Reassign task #5 to David\n\n` +
       `*🧠 AI Assistant & Teammate:*\n` +
       `• Tag *@${botName}* or reply to any bot message to plan tasks, debug, or ask questions.\n` +
       `• Send voice notes 🎙️ to ask questions or assign tasks on the go.\n` +
       `• Share flyers 📄, UI mockups 🖼️, or docs for automatic analysis.\n` +
-      `• The bot naturally chimes into technical discussions with engineering advice.`;
+      `• The bot naturally chimes into technical discussions and *will call out delayed or inactive members.*`;
     await sendSafeMessage(sock, remoteJid, helpText, msg);
     return;
   }
@@ -450,6 +465,156 @@ export async function handleMessage(sock, msg) {
     return;
   }
 
+  // ── Fast Task Commands ────────────────────────────────────────────────────
+
+  // /done #ID — mark a task as done
+  const doneMatch = cmd.match(/^(?:\/done|@bot done|\/bot done|@[a-z0-9_]+ done)\s+#?(\d+)$/i);
+  if (doneMatch) {
+    const taskId = parseInt(doneMatch[1], 10);
+    const task = updateTaskStatus(taskId, 'done');
+    if (!task) {
+      await sendSafeMessage(sock, remoteJid, `❌ Task *#${taskId}* not found.`, msg);
+    } else {
+      await sendSafeMessage(
+        sock, remoteJid,
+        `✅ *Task #${taskId} marked as done!*\n\n*${task.title}*\n_Nice work! We move. 🚀_`,
+        msg
+      );
+    }
+    return;
+  }
+
+  // /progress #ID — mark as in_progress
+  const progressMatch = cmd.match(/^(?:\/progress|@bot progress|\/bot progress|@[a-z0-9_]+ progress)\s+#?(\d+)$/i);
+  if (progressMatch) {
+    const taskId = parseInt(progressMatch[1], 10);
+    const task = updateTaskStatus(taskId, 'in_progress');
+    if (!task) {
+      await sendSafeMessage(sock, remoteJid, `❌ Task *#${taskId}* not found.`, msg);
+    } else {
+      await sendSafeMessage(
+        sock, remoteJid,
+        `🔄 *Task #${taskId} is now In Progress!*\n\n*${task.title}*\n_Let's get it! 💪_`,
+        msg
+      );
+    }
+    return;
+  }
+
+  // /block #ID [reason] — mark as blocked with optional reason
+  const blockMatch = text.match(/^(?:\/block|@bot block|\/bot block|@[a-z0-9_]+ block)\s+#?(\d+)(?:\s+(.+))?$/i);
+  if (blockMatch) {
+    const taskId = parseInt(blockMatch[1], 10);
+    const reason = blockMatch[2]?.trim() || '';
+    const task = setTaskBlockReason(taskId, reason);
+    if (!task) {
+      await sendSafeMessage(sock, remoteJid, `❌ Task *#${taskId}* not found.`, msg);
+    } else {
+      const reasonText = reason ? `\n🔒 *Blocker:* ${reason}` : '';
+      await sendSafeMessage(
+        sock, remoteJid,
+        `🔴 *Task #${taskId} marked as Blocked*\n\n*${task.title}*${reasonText}\n\n_Tag @bot to get help unblocking this._`,
+        msg
+      );
+    }
+    return;
+  }
+
+  // /assign #ID [name] — reassign task to a member
+  const assignFastMatch = text.match(/^(?:\/assign|@bot assign|\/bot assign|@[a-z0-9_]+ assign)\s+#?(\d+)\s+(.+)$/i);
+  if (assignFastMatch) {
+    const taskId = parseInt(assignFastMatch[1], 10);
+    const nameQuery = assignFastMatch[2].trim();
+    const foundMember = findMemberByName(nameQuery);
+    if (!foundMember) {
+      await sendSafeMessage(sock, remoteJid, `❌ Couldn't find a team member matching *"${nameQuery}"*. Check /tasks for current assignees or ask @bot to assign by name.`, msg);
+    } else {
+      const task = reassignTask(taskId, { assigned_to_jid: foundMember.jid, assigned_to_name: foundMember.name });
+      if (!task) {
+        await sendSafeMessage(sock, remoteJid, `❌ Task *#${taskId}* not found.`, msg);
+      } else {
+        const mention = foundMember.jid.endsWith('@s.whatsapp.net') ? [`${foundMember.jid}`] : [];
+        const tag = foundMember.jid.endsWith('@s.whatsapp.net') ? `@${foundMember.jid.split('@')[0]}` : foundMember.name;
+        await sendSafeMessage(
+          sock, remoteJid,
+          `🔁 *Task #${taskId} Reassigned!*\n\n*${task.title}*\n↳ Now assigned to ${tag}\n\n_${foundMember.name}, the ball is in your court. We dey count on you! 💪_`,
+          msg, mention
+        );
+        // DM the newly assigned member
+        if (foundMember.jid.endsWith('@s.whatsapp.net') && foundMember.jid !== senderJid) {
+          try {
+            await sendSafeMessage(
+              sock, foundMember.jid,
+              `👋 Hey *${foundMember.name}*!\n\nYou've been reassigned to task *#${task.id}: ${task.title}*${task.project_name ? ` (${task.project_name})` : ''}${task.due_date ? `\n📅 Due: ${task.due_date}` : ''}.\n\nDrop an update in the group when you start. Let's move! 🚀`,
+              null
+            );
+          } catch (_) { /* DM might fail if they haven't messaged the bot */ }
+        }
+      }
+    }
+    return;
+  }
+
+  // /mytasks — personal task list (works in DM and group)
+  if (isCommand('mytasks')) {
+    const myJid = senderJid;
+    const myTasks = getTasksByMember(myJid);
+    if (myTasks.length === 0) {
+      await sendSafeMessage(sock, remoteJid, `🎉 *No tasks assigned to you!* The board is clear for you right now.`, msg);
+    } else {
+      const open = myTasks.filter((t) => t.status !== 'done');
+      const done = myTasks.filter((t) => t.status === 'done');
+      const formatLine = (t) => {
+        const icon = t.status === 'done' ? '✅' : t.status === 'blocked' ? '🔴' : t.status === 'in_progress' ? '🔄' : '⏳';
+        const due = t.due_date ? ` | 📅 ${t.due_date.slice(0, 16)}` : '';
+        const blocker = t.block_reason ? `\n  🔒 ${t.block_reason}` : '';
+        const proj = t.project_name ? ` [${t.project_name}]` : '';
+        return `${icon} *#${t.id}*${proj} ${t.title}${due}${blocker}`;
+      };
+      let reply = `📋 *Your Tasks, ${senderName}*\n\n`;
+      if (open.length > 0) reply += `*Open (${open.length}):*\n${open.map(formatLine).join('\n')}\n\n`;
+      if (done.length > 0) reply += `*Done (${done.length}):*\n${done.slice(0, 5).map(formatLine).join('\n')}`;
+      reply = reply.trim();
+      await sendSafeMessage(sock, remoteJid, reply, msg);
+    }
+    return;
+  }
+
+  // /overdue — show all overdue tasks
+  if (isCommand('overdue')) {
+    const overdue = getOverdueTasks();
+    if (overdue.length === 0) {
+      await sendSafeMessage(sock, remoteJid, `✅ *No overdue tasks!* Everything is on track.`, msg);
+    } else {
+      const lines = overdue.map((t) => {
+        let assignee = t.assigned_to_name || 'Unassigned';
+        if (t.assigned_to_jid?.endsWith('@s.whatsapp.net')) {
+          assignee = `@${t.assigned_to_jid.split('@')[0]}`;
+        }
+        return `⚠️ *#${t.id}* ${t.title}\n  ↳ ${assignee} | Was due: ${t.due_date?.slice(0, 16) || 'N/A'}`;
+      }).join('\n\n');
+      const mentions = overdue.map((t) => t.assigned_to_jid).filter((j) => j?.endsWith('@s.whatsapp.net'));
+      await sendSafeMessage(sock, remoteJid, `🚨 *Overdue Tasks (${overdue.length})*\n\n${lines}\n\n_These need attention ASAP. Let's get them sorted!_`, msg, mentions);
+    }
+    return;
+  }
+
+  // /blocked — show all blocked tasks
+  if (isCommand('blocked')) {
+    const blocked = getBlockedTasks();
+    if (blocked.length === 0) {
+      await sendSafeMessage(sock, remoteJid, `✅ *No blocked tasks right now!*`, msg);
+    } else {
+      const lines = blocked.map((t) => {
+        let assignee = t.assigned_to_name || 'Unassigned';
+        const blocker = t.block_reason ? `\n  🔒 Reason: ${t.block_reason}` : '';
+        return `🔴 *#${t.id}* ${t.title}\n  ↳ ${assignee}${blocker}`;
+      }).join('\n\n');
+      await sendSafeMessage(sock, remoteJid, `🔴 *Blocked Tasks (${blocked.length})*\n\n${lines}\n\n_Tag @bot to help unblock any of these._`, msg);
+    }
+    return;
+  }
+
   // ── 5. Determine if bot should respond via AI ────────────────────────────
 
   const botJid = sock.user?.id ? sock.user.id.replace(':0', '') + '@s.whatsapp.net' : null;
@@ -505,9 +670,9 @@ Only chime in if:
 
   // ── 8. Call AI ───────────────────────────────────────────────────────────
 
-  let aiResponse;
+  let aiResult;
   try {
-    aiResponse = await askAI(remoteJid, enrichedMessage, mediaData);
+    aiResult = await askAI(remoteJid, enrichedMessage, mediaData);
   } catch (err) {
     console.error('[Handler] AI call failed:', err.message);
     if (directTrigger) {
@@ -516,19 +681,35 @@ Only chime in if:
     return;
   }
 
+  const aiText = typeof aiResult === 'string' ? aiResult : (aiResult?.text || '');
+  const pendingDms = aiResult?.pendingDms || [];
+
   // ── 9. Respect SKIP signal from organic mode ──────────────────────────────
 
-  if (!directTrigger && aiResponse?.trim() === 'SKIP') {
+  if (!directTrigger && aiText.trim() === 'SKIP') {
     return; // Bot decided not to chime in
   }
 
   // ── 10. Send response ────────────────────────────────────────────────────
 
-  if (aiResponse?.trim()) {
-    await sendSafeMessage(sock, remoteJid, aiResponse, msg);
+  if (aiText.trim()) {
+    await sendSafeMessage(sock, remoteJid, aiText, msg);
 
     if (!directTrigger) {
       resetChimeIn();
+    }
+  }
+
+  // ── 11. Dispatch any queued private DM notifications ─────────────────────
+
+  for (const dm of pendingDms) {
+    if (dm.jid && dm.message) {
+      try {
+        await sendSafeMessage(sock, dm.jid, dm.message);
+        console.log(`[Handler] 📨 Dispatched task DM notification to ${dm.jid}`);
+      } catch (dmErr) {
+        console.error('[Handler] Failed to dispatch DM notification:', dmErr.message);
+      }
     }
   }
 }

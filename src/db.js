@@ -138,16 +138,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date);
 `);
 
-// Safe migration for existing databases missing notified_24h or notified_due on tasks
-try {
-  db.exec(`ALTER TABLE tasks ADD COLUMN notified_24h INTEGER DEFAULT 0;`);
-} catch (e) {
-  // Column already exists, ignore
-}
-try {
-  db.exec(`ALTER TABLE tasks ADD COLUMN notified_due INTEGER DEFAULT 0;`);
-} catch (e) {
-  // Column already exists, ignore
+// Safe migrations for tasks table
+const taskMigrations = [
+  `ALTER TABLE tasks ADD COLUMN notified_24h INTEGER DEFAULT 0;`,
+  `ALTER TABLE tasks ADD COLUMN notified_due INTEGER DEFAULT 0;`,
+  `ALTER TABLE tasks ADD COLUMN completed_at TEXT DEFAULT '';`,
+  `ALTER TABLE tasks ADD COLUMN updated_at TEXT DEFAULT '';`,
+  `ALTER TABLE tasks ADD COLUMN block_reason TEXT DEFAULT '';`,
+  `ALTER TABLE tasks ADD COLUMN notified_overdue_at TEXT DEFAULT '';`,
+];
+for (const sql of taskMigrations) {
+  try { db.exec(sql); } catch (e) { /* Column already exists */ }
 }
 
 // ─── team_members ─────────────────────────────────────────────────────────────
@@ -237,9 +238,14 @@ export function createTask({ title, description, assigned_to_jid, assigned_to_na
   return db.prepare('SELECT * FROM tasks WHERE id = ?').get(info.lastInsertRowid);
 }
 
-/** Update a task's status. */
+/** Update a task's status. Sets completed_at when marking done. */
 export function updateTaskStatus(task_id, status) {
-  db.prepare('UPDATE tasks SET status = ? WHERE id = ?').run(status, task_id);
+  const now = getNow();
+  if (status === 'done') {
+    db.prepare('UPDATE tasks SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?').run(status, now, now, task_id);
+  } else {
+    db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run(status, now, task_id);
+  }
   return db.prepare('SELECT * FROM tasks WHERE id = ?').get(task_id);
 }
 
@@ -562,6 +568,152 @@ export function pruneOldMessages(days = 90) {
     WHERE timestamp < ?
   `).run(cutoff);
   return info.changes;
+}
+
+/** Set a task's block reason. */
+export function setTaskBlockReason(task_id, reason) {
+  const now = getNow();
+  db.prepare('UPDATE tasks SET status = ?, block_reason = ?, updated_at = ? WHERE id = ?').run('blocked', reason || '', now, task_id);
+  return db.prepare('SELECT * FROM tasks WHERE id = ?').get(task_id);
+}
+
+/** Get all tasks currently overdue (past due_date and not done). */
+export function getOverdueTasks() {
+  const now = getNow();
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE status NOT IN ('done')
+      AND due_date != ''
+      AND datetime(due_date) < datetime(?)
+    ORDER BY datetime(due_date) ASC
+  `).all(now);
+}
+
+/** Get all tasks with 'blocked' status. */
+export function getBlockedTasks() {
+  return db.prepare(`
+    SELECT * FROM tasks WHERE status = 'blocked' ORDER BY created_at ASC
+  `).all();
+}
+
+/**
+ * Get all tasks for a specific member JID, sorted by urgency.
+ * Open tasks first (in_progress > blocked > todo), then done.
+ */
+export function getTasksByMember(jid) {
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE assigned_to_jid = ?
+    ORDER BY
+      CASE status
+        WHEN 'in_progress' THEN 1
+        WHEN 'blocked'     THEN 2
+        WHEN 'todo'        THEN 3
+        WHEN 'done'        THEN 4
+        ELSE 5
+      END,
+      CASE WHEN due_date = '' THEN 1 ELSE 0 END,
+      datetime(due_date) ASC
+  `).all(jid);
+}
+
+/**
+ * Get member activity stats (message count + last active) for the last N days.
+ * Used by accountability watchdog and velocity report.
+ */
+export function getMemberActivityStats(days = 7) {
+  const cutoff = getRelativeTime(0, -days);
+  return db.prepare(`
+    SELECT sender_jid, sender_name,
+           COUNT(*) as message_count,
+           MAX(timestamp) as last_active
+    FROM messages
+    WHERE timestamp >= ?
+    GROUP BY sender_jid
+    ORDER BY message_count DESC
+  `).all(cutoff);
+}
+
+/**
+ * Get team members who have open tasks but haven't sent a message
+ * in the last `inactiveDays` days. Used by accountability watchdog.
+ */
+export function getInactiveMembersWithTasks(inactiveDays = 2) {
+  const cutoff = getRelativeTime(0, -inactiveDays);
+  const assignees = db.prepare(`
+    SELECT DISTINCT assigned_to_jid, assigned_to_name
+    FROM tasks
+    WHERE status NOT IN ('done') AND assigned_to_jid != ''
+  `).all();
+
+  const inactive = [];
+  for (const member of assignees) {
+    const lastMsg = db.prepare(`
+      SELECT timestamp FROM messages
+      WHERE sender_jid = ?
+      ORDER BY timestamp DESC LIMIT 1
+    `).get(member.assigned_to_jid);
+
+    const isInactive = !lastMsg || lastMsg.timestamp < cutoff;
+    if (isInactive) {
+      const tasks = db.prepare(`
+        SELECT * FROM tasks
+        WHERE assigned_to_jid = ? AND status NOT IN ('done')
+      `).all(member.assigned_to_jid);
+      inactive.push({
+        jid: member.assigned_to_jid,
+        name: member.assigned_to_name,
+        tasks,
+        lastActive: lastMsg?.timestamp || null,
+      });
+    }
+  }
+  return inactive;
+}
+
+/** Mark an overdue task as nudged (sets notified_overdue_at to now). */
+export function markTaskOverdueNotified(task_id) {
+  const now = getNow();
+  db.prepare('UPDATE tasks SET notified_overdue_at = ? WHERE id = ?').run(now, task_id);
+}
+
+/**
+ * Get tasks that are overdue and haven't been nudged in the last 24h.
+ * Used by the accountability watchdog.
+ */
+export function getUnnotifiedOverdueTasks() {
+  const now = getNow();
+  const cutoff24h = getRelativeTime(-24);
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE status NOT IN ('done')
+      AND due_date != ''
+      AND datetime(due_date) < datetime(?)
+      AND (notified_overdue_at = '' OR notified_overdue_at IS NULL OR datetime(notified_overdue_at) < datetime(?))
+    ORDER BY datetime(due_date) ASC
+  `).all(now, cutoff24h);
+}
+
+/** Get tasks completed within the last N days (uses completed_at). */
+export function getCompletedTasksInRange(days = 7) {
+  const cutoff = getRelativeTime(0, -days);
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE status = 'done'
+      AND completed_at != ''
+      AND datetime(completed_at) >= datetime(?)
+    ORDER BY datetime(completed_at) DESC
+  `).all(cutoff);
+}
+
+/** Get tasks created within the last N days. */
+export function getCreatedTasksInRange(days = 7) {
+  const cutoff = getRelativeTime(0, -days);
+  return db.prepare(`
+    SELECT * FROM tasks
+    WHERE datetime(created_at) >= datetime(?)
+    ORDER BY datetime(created_at) DESC
+  `).all(cutoff);
 }
 
 export default db;
