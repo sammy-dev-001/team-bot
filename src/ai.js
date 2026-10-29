@@ -27,6 +27,11 @@ import {
   getOverdueTasks,
   getBlockedTasks,
   getMemberActivityStats,
+  createReminder,
+  saveCodeSnippet,
+  searchCodeSnippets,
+  logAudit,
+  getRecentConversationHistory,
   getNow,
 } from './db.js';
 
@@ -237,6 +242,57 @@ const TOOLS = [
           required: [],
         },
       },
+      {
+        name: 'set_reminder',
+        description: 'Set a one-shot reminder for a specific date and time. Always call this when a user asks to be reminded in X minutes/hours/days or at a given time.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            reminder_text: { type: 'STRING', description: 'What to remind about' },
+            due_time:      { type: 'STRING', description: 'ISO 8601 due date-time, e.g. "2026-10-29T16:00:00"' },
+            target_type:   { type: 'STRING', enum: ['dm', 'group'], description: 'Deliver in DM or group (default: dm)' },
+          },
+          required: ['reminder_text', 'due_time'],
+        },
+      },
+      {
+        name: 'save_code_snippet',
+        description: 'Save a technical code snippet, architecture pattern, or workaround into the team repository.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            title:       { type: 'STRING', description: 'Descriptive title of the snippet' },
+            language:    { type: 'STRING', description: 'Language (e.g. javascript, typescript, python, sql, bash)' },
+            code:        { type: 'STRING', description: 'The exact source code or snippet text' },
+            description: { type: 'STRING', description: 'Optional explanation or use case' },
+          },
+          required: ['title', 'code'],
+        },
+      },
+      {
+        name: 'search_code_snippets',
+        description: 'Search saved code snippets and technical solutions by title, language, or keyword.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            keyword: { type: 'STRING', description: 'Search term or language name' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'create_poll',
+        description: 'Create a native WhatsApp poll in the group for team decisions, architecture voting, or meeting preferences.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            question:         { type: 'STRING', description: 'The poll question / decision topic' },
+            options:          { type: 'ARRAY', items: { type: 'STRING' }, description: '2 to 12 distinct options' },
+            selectable_count: { type: 'NUMBER', description: '1 for single choice, >1 for multi-select (default: 1)' },
+          },
+          required: ['question', 'options'],
+        },
+      },
     ],
   },
 ];
@@ -248,7 +304,7 @@ const TOOLS = [
  * Returns a plain-object result that gets fed back to the model.
  * pendingDms is an optional array that collects DM notifications to send after the AI turn.
  */
-function executeTool(name, args, pendingDms = null) {
+function executeTool(name, args, pendingDms = null, meta = {}) {
   switch (name) {
     case 'upsert_team_member': {
       const result = upsertMember(args);
@@ -332,6 +388,42 @@ function executeTool(name, args, pendingDms = null) {
       const stats = getMemberActivityStats(args.days || 7);
       return { success: true, stats, days: args.days || 7 };
     }
+    case 'set_reminder': {
+      const targetJid = args.target_type === 'group' ? meta.chatJid : (meta.senderJid || meta.chatJid);
+      const reminder = createReminder({
+        user_jid: meta.senderJid || meta.chatJid,
+        user_name: meta.senderName || '',
+        target_jid: targetJid,
+        reminder_text: args.reminder_text,
+        due_time: args.due_time,
+      });
+      return { success: true, reminder };
+    }
+    case 'save_code_snippet': {
+      const snippet = saveCodeSnippet({
+        title: args.title,
+        language: args.language || 'javascript',
+        code: args.code,
+        description: args.description || '',
+        added_by: meta.senderName || '',
+      });
+      return { success: true, snippet };
+    }
+    case 'search_code_snippets': {
+      const snippets = searchCodeSnippets(args.keyword || '');
+      return { success: true, snippets, count: snippets.length };
+    }
+    case 'create_poll': {
+      if (meta.polls) {
+        meta.polls.push({
+          jid: meta.chatJid,
+          name: args.question,
+          values: args.options,
+          selectableCount: args.selectable_count || 1,
+        });
+      }
+      return { success: true, question: args.question, options: args.options };
+    }
     default:
       return { success: false, error: `Unknown tool: ${name}` };
   }
@@ -374,14 +466,22 @@ function buildSystemPrompt(groupJid) {
         .join('\n')
     : '  (No open tasks)';
 
-  // Upcoming deadlines
+  // Upcoming deadlines with countdown widget
   const deadlines = getUpcomingDeadlines();
   const deadlineLines = deadlines.length
     ? deadlines
-        .map(
-          (d) =>
-            `  • [${d.category.toUpperCase()}] "${d.title}" — Due: ${d.due_date} | ${d.description}`
-        )
+        .map((d) => {
+          const diffMs = new Date(d.due_date).getTime() - Date.now();
+          let countdown = '';
+          if (diffMs > 0) {
+            const days = Math.floor(diffMs / 86400000);
+            const hours = Math.floor((diffMs % 86400000) / 3600000);
+            countdown = ` [COUNTDOWN: ${days}d ${hours}h remaining]`;
+          } else {
+            countdown = ' [OVERDUE]';
+          }
+          return `  • [${d.category.toUpperCase()}] "${d.title}" — Due: ${d.due_date}${countdown} | ${d.description || ''}`;
+        })
         .join('\n')
     : '  (No upcoming deadlines)';
 
@@ -392,6 +492,14 @@ function buildSystemPrompt(groupJid) {
         .map((m) => `  [${m.timestamp}] ${m.sender_name} (${m.sender_jid}): ${m.content}`)
         .join('\n')
     : '  (No recent messages)';
+
+  // Multi-turn rolling conversation turns
+  const turns = getRecentConversationHistory(groupJid, 8);
+  const turnLines = turns.length
+    ? turns
+        .map((t) => `  [${t.role.toUpperCase()}]: ${t.content}`)
+        .join('\n')
+    : '  (No prior conversation turns in memory)';
 
   return `You are ${process.env.BOT_NAME || 'TeamBot'}, a sharp senior software engineer and active teammate in this tech squad's WhatsApp group. You are based in Nigeria 🇳🇬 (Lagos tech ecosystem vibe), pragmatic, competent, and deeply supportive of the team.
 
@@ -409,6 +517,9 @@ ${deadlineLines}
 
 ═══ RECENT GROUP MESSAGES (last 30) ═══
 ${historyLines}
+
+═══ RECENT MULTI-TURN AI MEMORY ═══
+${turnLines}
 
 ═══ 90-DAY MEMORY & HISTORICAL RECALL ═══
 You have access to the last 30 messages in immediate context, plus the permanent Team Directory, Tasks, and Project Notes. Whenever a teammate asks about an older conversation, link, decision, or event from up to 90 days ago, ALWAYS call search_chat_history before answering.
@@ -485,7 +596,7 @@ async function callGeminiWithRetryAndFallback(params) {
  * @param {object|Array}  [mediaData]    - Optional: { mimeType, base64 } or array of media objects.
  * @returns {Promise<string>}            - Final text response to send to the group.
  */
-export async function askAI(groupJid, userMessage, mediaData = null) {
+export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) {
   const systemPrompt = buildSystemPrompt(groupJid);
 
   // Build the user content parts
@@ -509,6 +620,8 @@ export async function askAI(groupJid, userMessage, mediaData = null) {
 
   let finalText = '';
   const pendingDms = []; // DM notifications collected during tool calls
+  const polls = []; // Polls queued for native dispatch
+  const toolMeta = { ...meta, chatJid: groupJid, polls };
   const MAX_ITERATIONS = 8; // Safety cap on tool loop iterations
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -545,7 +658,7 @@ export async function askAI(groupJid, userMessage, mediaData = null) {
       if (part.functionCall) {
         const { name, args } = part.functionCall;
         console.log(`[AI] 🔧 Calling tool: ${name}`, JSON.stringify(args));
-        const result = executeTool(name, args, pendingDms);
+        const result = executeTool(name, args, pendingDms, toolMeta);
         console.log(`[AI] ✅ Tool result:`, JSON.stringify(result));
 
         toolResultParts.push({
@@ -565,6 +678,7 @@ export async function askAI(groupJid, userMessage, mediaData = null) {
   return {
     text: finalText || '_Omo, my brain glitched for a second 🤯 Abeg try again._',
     pendingDms,
+    polls,
   };
 }
 
@@ -755,7 +869,18 @@ export async function generateStandupBrief(groupJid, last24hMessages, openTasks,
 
   const deadlineSummary = upcomingDeadlines.length
     ? upcomingDeadlines
-        .map((d) => `• [${d.category}] "${d.title}" — ${d.due_date}`)
+        .map((d) => {
+          const diffMs = new Date(d.due_date).getTime() - Date.now();
+          let countdown = '';
+          if (diffMs > 0) {
+            const days = Math.floor(diffMs / 86400000);
+            const hours = Math.floor((diffMs % 86400000) / 3600000);
+            countdown = ` [⏳ ${days}d ${hours}h left]`;
+          } else {
+            countdown = ' [🚨 OVERDUE]';
+          }
+          return `• [${d.category.toUpperCase()}] "${d.title}" — Due: ${d.due_date}${countdown}`;
+        })
         .join('\n')
     : 'No upcoming deadlines.';
 
@@ -769,14 +894,14 @@ ${msgSummary}
 Open Tasks:
 ${taskSummary}
 
-Upcoming Deadlines:
+Upcoming Deadlines & Countdowns:
 ${deadlineSummary}
 
 Structure the standup cleanly using WhatsApp formatting:
 1. *🌅 Good morning, team!* — A warm, brief greeting (1–2 sentences).
 2. *📝 Yesterday's Highlights* — 2–3 concise bullet points summarizing major updates or decisions from yesterday's chat.
 3. *✅ Active Tasks* — Bulleted list of open tasks with @phonenumber mentions for assignees, current status, and due dates. Flag overdue or urgent ones with ⚠️.
-4. *⏰ Deadline Radar* — Approaching deadlines (especially any within 48h). Keep it urgent but composed.
+4. *⏰ Deadline Radar & Countdown Widget* — Approaching deadlines featuring exact countdowns (e.g. "DevFest submission closes in 2 days, 14 hours!").
 5. *🚀 Today's Priority* — 1–2 practical, actionable pointers for the day.
 6. A quick closing word of momentum (e.g., "Let's get it today team! 💪").
 

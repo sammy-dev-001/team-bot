@@ -35,6 +35,8 @@ import {
   getCompletedTasksInRange,
   getCreatedTasksInRange,
   getAllMembers,
+  getDueReminders,
+  markReminderSent,
   getNow,
 } from './db.js';
 import {
@@ -374,6 +376,24 @@ async function runWatchdog(sock) {
 
 async function runDueReminderWatchdog(sock) {
   try {
+    // 6a. Check one-shot user/team reminders
+    const dueReminders = getDueReminders();
+    for (const rem of dueReminders) {
+      const isPhone = rem.user_jid && rem.user_jid.endsWith('@s.whatsapp.net');
+      const tag = isPhone ? `@${rem.user_jid.split('@')[0]}` : (rem.user_name || 'Teammate');
+      const mention = isPhone ? [rem.user_jid] : [];
+      const alert =
+        `🔔 *REMINDER ALERT!* 🔔\n\n` +
+        `Hey ${tag}, here is what you scheduled to be reminded about:\n\n` +
+        `*${rem.reminder_text}*\n\n` +
+        `_Scheduled for ${rem.due_time}. Make we get it done! 🎯_`;
+
+      await sendSafeMessage(sock, rem.target_jid, alert, null, mention);
+      markReminderSent(rem.id);
+      console.log(`[Scheduler] 🔔 Delivered reminder #${rem.id} to ${rem.target_jid}`);
+    }
+
+    // 6b. Check tasks that are due now
     const dueTasks = getTasksDueNow();
     if (dueTasks.length === 0) return;
 

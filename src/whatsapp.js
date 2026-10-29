@@ -27,6 +27,11 @@ let sock = null;
 /** Reconnection timer reference to avoid duplicate reconnection loops. */
 let reconnectTimer = null;
 
+/** Exponential backoff reconnect attempts counter. */
+let reconnectAttempts = 0;
+const BASE_RECONNECT_DELAY_MS = 3000;
+const MAX_RECONNECT_DELAY_MS = 60000;
+
 /** Callbacks registered by handler.js / scheduler.js */
 const messageHandlers = [];
 
@@ -104,6 +109,39 @@ export async function sendSafeMessage(sockRef, jid, text, quotedMsg = null, ment
   }
 }
 
+/**
+ * Send a native WhatsApp poll.
+ * @param {object}   sockRef         - The Baileys socket.
+ * @param {string}   jid             - Target chat JID.
+ * @param {string}   name            - Question / topic of the poll.
+ * @param {string[]} values          - Array of poll options.
+ * @param {number}   [selectableCount=1] - 1 for single-choice, >1 for multiple.
+ */
+export async function sendPollMessage(sockRef, jid, name, values, selectableCount = 1) {
+  if (!sockRef) {
+    console.error('[sendPollMessage] Socket not available yet.');
+    return;
+  }
+  try {
+    await randomDelay(1000, 2000);
+    const validOptions = values.map((v) => v.trim()).filter(Boolean);
+    if (validOptions.length < 2) {
+      console.warn('[sendPollMessage] Polls require at least 2 options.');
+      return;
+    }
+    await sockRef.sendMessage(jid, {
+      poll: {
+        name,
+        values: validOptions,
+        selectableCount: Math.max(1, Math.min(selectableCount, validOptions.length)),
+      },
+    });
+    console.log(`[WhatsApp] 📊 Sent native poll to ${jid}: "${name}" (${validOptions.length} options)`);
+  } catch (err) {
+    console.error('[sendPollMessage] Failed to send poll:', err.message);
+  }
+}
+
 // ─── Core: connectToWhatsApp ─────────────────────────────────────────────────
 
 /**
@@ -154,17 +192,23 @@ export async function connectToWhatsApp() {
       if (reason === DisconnectReason.loggedOut) {
         console.log('[WhatsApp] Logged out. Delete auth_info/ and restart.');
       } else {
-        console.log('[WhatsApp] Reconnecting in 5 seconds…');
+        const delay = Math.min(
+          Math.floor(BASE_RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttempts)),
+          MAX_RECONNECT_DELAY_MS
+        );
+        reconnectAttempts++;
+        console.log(`[WhatsApp] Reconnecting in ${Math.round(delay / 1000)}s (backoff attempt ${reconnectAttempts})…`);
         if (!reconnectTimer) {
           reconnectTimer = setTimeout(() => {
             reconnectTimer = null;
             connectToWhatsApp();
-          }, 5000);
+          }, delay);
         }
       }
     }
 
     if (connection === 'open') {
+      reconnectAttempts = 0;
       console.log(`[WhatsApp] ✅ Connected as ${sock.user?.name || sock.user?.id}`);
     }
   });
@@ -210,7 +254,12 @@ export async function connectToWhatsApp() {
           text.startsWith('/block') ||
           text.startsWith('/assign') ||
           text.startsWith('/overdue') ||
-          text.startsWith('/blocked');
+          text.startsWith('/blocked') ||
+          text.startsWith('/remind') ||
+          text.startsWith('/snippet') ||
+          text.startsWith('/poll') ||
+          text.startsWith('/countdown') ||
+          text.startsWith('/audit');
 
         if (!isExplicitSelfCommand) continue;
       }

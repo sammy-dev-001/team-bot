@@ -29,9 +29,14 @@ import {
   setTaskBlockReason,
   findMemberByName,
   getMember,
+  createReminder,
+  saveCodeSnippet,
+  searchCodeSnippets,
+  getRecentAuditLogs,
+  saveConversationTurn,
 } from './db.js';
 import { askAI, generateStandupBrief } from './ai.js';
-import { sendSafeMessage } from './whatsapp.js';
+import { sendSafeMessage, sendPollMessage } from './whatsapp.js';
 
 // ─── Organic chime-in cooldown state ─────────────────────────────────────────
 
@@ -327,19 +332,25 @@ export async function handleMessage(sock, msg) {
       `*⚡ Fast Commands (Instant Response):*\n` +
       `• */tasks* — View all active open team tasks\n` +
       `• */deadlines* — View approaching project & hackathon deadlines\n` +
-      `• */notes [keyword]* — Search or view saved project notes\n` +
-      `• */standup* — Generate an on-demand morning standup brief\n` +
-      `• */status* or */ping* — View bot uptime & health metrics\n` +
+      `• */countdown* — Live countdown timer for all deadlines\n` +
       `• */mytasks* — Your personal task list (use in DM for privacy)\n` +
       `• */overdue* — Show all overdue tasks\n` +
-      `• */blocked* — Show all blocked tasks\n\n` +
+      `• */blocked* — Show all blocked tasks\n` +
+      `• */notes [keyword]* — Search or view saved project notes\n` +
+      `• */snippet [keyword]* — Search saved code snippets & solutions\n` +
+      `• */standup* — Generate an on-demand morning standup brief\n` +
+      `• */status* or */ping* — View bot uptime & health metrics\n` +
+      `• */audit* — View recent team audit trail\n\n` +
       `*✅ Task Fast Commands:*\n` +
       `• */done #5* — Mark task #5 as done\n` +
       `• */progress #5* — Mark task #5 as in progress\n` +
       `• */block #5 [reason]* — Mark task #5 as blocked\n` +
-      `• */assign #5 David* — Reassign task #5 to David\n\n` +
+      `• */assign #5 David* — Reassign task #5 to David\n` +
+      `• */remind in 30 mins to [action]* — Set a personal reminder\n` +
+      `• */poll "Question" "Opt 1" "Opt 2"* — Launch a native WhatsApp poll\n\n` +
       `*🧠 AI Assistant & Teammate:*\n` +
       `• Tag *@${botName}* or reply to any bot message to plan tasks, debug, or ask questions.\n` +
+      `• Multi-turn conversational memory persists across turns.\n` +
       `• Send voice notes 🎙️ to ask questions or assign tasks on the go.\n` +
       `• Share flyers 📄, UI mockups 🖼️, or docs for automatic analysis.\n` +
       `• The bot naturally chimes into technical discussions and *will call out delayed or inactive members.*`;
@@ -615,6 +626,148 @@ export async function handleMessage(sock, msg) {
     return;
   }
 
+  // /countdown — Live countdown timers for deadlines
+  if (isCommand('countdown')) {
+    const deadlines = listDeadlines({ upcomingOnly: true });
+    if (deadlines.length === 0) {
+      await sendSafeMessage(sock, remoteJid, '📅 *No upcoming deadlines on the radar!*', msg);
+      return;
+    }
+    const lines = deadlines.map((d) => {
+      const diffMs = new Date(d.due_date).getTime() - Date.now();
+      let timer = '';
+      if (diffMs > 0) {
+        const days = Math.floor(diffMs / 86400000);
+        const hours = Math.floor((diffMs % 86400000) / 3600000);
+        const mins = Math.floor((diffMs % 3600000) / 60000);
+        timer = `⏳ *${days}d ${hours}h ${mins}m left*`;
+      } else {
+        timer = `🚨 *OVERDUE!*`;
+      }
+      const desc = d.description ? `\n  ↳ 📝 ${d.description}` : '';
+      return `• *[${d.category.toUpperCase()}] ${d.title}*\n  ↳ 📅 Due: ${d.due_date}\n  ↳ ${timer}${desc}`;
+    }).join('\n\n');
+
+    await sendSafeMessage(sock, remoteJid, `⏳ *Deadline Radar & Live Countdowns*\n\n${lines}\n\n_Make we push sharp sharp. Time waits for no engineer! 🚀_`, msg);
+    return;
+  }
+
+  // /poll "Question" "Option 1" "Option 2" ...
+  if (isCommandWithArg('poll')) {
+    const raw = text.replace(/^(\/poll|@bot\s+poll|\/bot\s+poll|@[a-zA-Z0-9_]+\s+poll|\/[a-zA-Z0-9_]+\s+poll)\s*/i, '').trim();
+    const matches = [...raw.matchAll(/"([^"]+)"|'([^']+)'/g)];
+    if (matches.length >= 3) {
+      const question = matches[0][1] || matches[0][2];
+      const options = matches.slice(1).map((m) => (m[1] || m[2]).trim()).filter(Boolean);
+      await sendPollMessage(sock, remoteJid, question, options);
+    } else {
+      await sendSafeMessage(
+        sock, remoteJid,
+        `💡 *How to launch a poll:*\n\n\`/poll "Question" "Option 1" "Option 2" ["Option 3"]\`\n\n_Example:_\n\`/poll "Which DB should we use?" "Supabase" "PostgreSQL" "Firebase"\``,
+        msg
+      );
+    }
+    return;
+  }
+
+  // /remind [in X mins/hours/days] to [action]
+  if (isCommandWithArg('remind')) {
+    const raw = text.replace(/^(\/remind|@bot\s+remind|\/bot\s+remind|@[a-zA-Z0-9_]+\s+remind|\/[a-zA-Z0-9_]+\s+remind)\s*/i, '').trim();
+    const match = raw.match(/^(?:in\s+)?(\d+)\s*(m|min|mins|minutes|h|hr|hrs|hours|d|day|days)\s+(?:to\s+)?(.+)$/i);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      const unit = match[2].toLowerCase();
+      const reminderText = match[3].trim();
+      let ms = 0;
+      if (unit.startsWith('m')) ms = num * 60 * 1000;
+      else if (unit.startsWith('h')) ms = num * 3600 * 1000;
+      else if (unit.startsWith('d')) ms = num * 86400 * 1000;
+      const targetDate = new Date(Date.now() + ms);
+      const pad = (n) => String(n).padStart(2, '0');
+      const dueTime = `${targetDate.getFullYear()}-${pad(targetDate.getMonth()+1)}-${pad(targetDate.getDate())} ${pad(targetDate.getHours())}:${pad(targetDate.getMinutes())}:${pad(targetDate.getSeconds())}`;
+
+      createReminder({
+        user_jid: senderJid,
+        user_name: senderName,
+        target_jid: isDM ? senderJid : remoteJid,
+        reminder_text: reminderText,
+        due_time: dueTime,
+      });
+
+      await sendSafeMessage(
+        sock, remoteJid,
+        `⏰ *Reminder Set!*\n\n• *Reminder:* ${reminderText}\n• *Deliver At:* ${dueTime}\n• *Destination:* ${isDM ? 'Private DM' : 'This Chat'}\n\n_I'll ping you right on time. No dulling! 🎯_`,
+        msg
+      );
+    } else {
+      await sendSafeMessage(
+        sock, remoteJid,
+        `💡 *How to set a reminder:*\n\n\`/remind in 30 mins to test auth webhook\`\n\`/remind in 2 hours to push commit\`\n\`/remind in 1 day to submit project\``,
+        msg
+      );
+    }
+    return;
+  }
+
+  // /snippet save [title] ```code``` OR /snippet [query]
+  if (isCommandWithArg('snippet')) {
+    const raw = text.replace(/^(\/snippet|@bot\s+snippet|\/bot\s+snippet|@[a-zA-Z0-9_]+\s+snippet|\/[a-zA-Z0-9_]+\s+snippet)\s*/i, '').trim();
+    if (raw.toLowerCase().startsWith('save')) {
+      const rest = raw.slice(4).trim();
+      const codeBlockMatch = rest.match(/(?:```([a-zA-Z0-9_+#-]*)\n?([\s\S]+?)```)/);
+      if (codeBlockMatch) {
+        const lang = codeBlockMatch[1]?.trim() || 'javascript';
+        const code = codeBlockMatch[2]?.trim();
+        const title = rest.slice(0, rest.indexOf('```')).trim() || 'Code Snippet';
+        const snippet = saveCodeSnippet({
+          title,
+          language: lang,
+          code,
+          added_by: senderName,
+        });
+        await sendSafeMessage(
+          sock, remoteJid,
+          `💾 *Code Snippet Saved (#${snippet.id})*\n\n*${snippet.title}* [${snippet.language}]\n\n_Use \`/snippet ${snippet.title.split(' ')[0]}\` to retrieve it anytime._`,
+          msg
+        );
+      } else {
+        await sendSafeMessage(
+          sock, remoteJid,
+          '💡 *How to save a snippet:*\n`/snippet save <Title>\n```javascript\nconst x = 1;\n```\n`',
+          msg
+        );
+      }
+      return;
+    }
+
+    // Search snippets
+    const results = searchCodeSnippets(raw);
+    if (results.length === 0) {
+      await sendSafeMessage(sock, remoteJid, `🔍 No code snippets found${raw ? ` matching "${raw}"` : ''}.`, msg);
+    } else {
+      const formatted = results.map((s) => {
+        const by = s.added_by ? ` (added by ${s.added_by})` : '';
+        return `📦 *#${s.id} ${s.title}* [${s.language}]${by}\n\`\`\`${s.language}\n${s.code.slice(0, 400)}${s.code.length > 400 ? '\n// ...' : ''}\`\`\``;
+      }).join('\n\n');
+      await sendSafeMessage(sock, remoteJid, `💻 *Code Snippets${raw ? ` for "${raw}"` : ''}*\n\n${formatted}`, msg);
+    }
+    return;
+  }
+
+  // /audit — view recent system audit logs
+  if (isCommand('audit') || isCommand('logs')) {
+    const logs = getRecentAuditLogs(10);
+    if (logs.length === 0) {
+      await sendSafeMessage(sock, remoteJid, '📋 *Audit log is currently empty.*', msg);
+    } else {
+      const lines = logs.map((l) => {
+        return `• [${l.created_at.slice(5, 16)}] *${l.action}* ${l.entity_type} (#${l.entity_id}) by _${l.performed_by}_: ${l.details}`;
+      }).join('\n');
+      await sendSafeMessage(sock, remoteJid, `🛡️ *Recent Team Audit Trail (Last 10 Actions)*\n\n${lines}`, msg);
+    }
+    return;
+  }
+
   // ── 5. Determine if bot should respond via AI ────────────────────────────
 
   const botJid = sock.user?.id ? sock.user.id.replace(':0', '') + '@s.whatsapp.net' : null;
@@ -670,9 +823,14 @@ Only chime in if:
 
   // ── 8. Call AI ───────────────────────────────────────────────────────────
 
+  // Record user's turn in multi-turn conversation memory
+  if (text || userContent) {
+    saveConversationTurn(remoteJid, senderJid, 'user', text || userContent);
+  }
+
   let aiResult;
   try {
-    aiResult = await askAI(remoteJid, enrichedMessage, mediaData);
+    aiResult = await askAI(remoteJid, enrichedMessage, mediaData, { senderJid, senderName, isDM });
   } catch (err) {
     console.error('[Handler] AI call failed:', err.message);
     if (directTrigger) {
@@ -683,6 +841,7 @@ Only chime in if:
 
   const aiText = typeof aiResult === 'string' ? aiResult : (aiResult?.text || '');
   const pendingDms = aiResult?.pendingDms || [];
+  const polls = aiResult?.polls || [];
 
   // ── 9. Respect SKIP signal from organic mode ──────────────────────────────
 
@@ -695,12 +854,27 @@ Only chime in if:
   if (aiText.trim()) {
     await sendSafeMessage(sock, remoteJid, aiText, msg);
 
+    // Save model's reply into multi-turn conversation memory
+    saveConversationTurn(remoteJid, botJid || 'teambot', 'model', aiText.trim());
+
     if (!directTrigger) {
       resetChimeIn();
     }
   }
 
-  // ── 11. Dispatch any queued private DM notifications ─────────────────────
+  // ── 11. Dispatch any queued native polls ─────────────────────────────────
+
+  for (const p of polls) {
+    if (p.name && p.values) {
+      try {
+        await sendPollMessage(sock, p.jid || remoteJid, p.name, p.values, p.selectableCount || 1);
+      } catch (pollErr) {
+        console.error('[Handler] Failed to dispatch native poll:', pollErr.message);
+      }
+    }
+  }
+
+  // ── 12. Dispatch any queued private DM notifications ─────────────────────
 
   for (const dm of pendingDms) {
     if (dm.jid && dm.message) {

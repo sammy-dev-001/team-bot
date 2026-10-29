@@ -130,12 +130,56 @@ db.exec(`
     created_at   TEXT DEFAULT ''
   );
 
+  CREATE TABLE IF NOT EXISTS reminders (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_jid       TEXT NOT NULL,
+    user_name      TEXT DEFAULT '',
+    target_jid     TEXT NOT NULL,
+    reminder_text  TEXT NOT NULL,
+    due_time       TEXT NOT NULL,
+    is_sent        INTEGER DEFAULT 0,
+    created_at     TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS code_snippets (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    title        TEXT NOT NULL,
+    language     TEXT DEFAULT 'javascript',
+    code         TEXT NOT NULL,
+    description  TEXT DEFAULT '',
+    added_by     TEXT DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    action        TEXT NOT NULL,
+    entity_type   TEXT NOT NULL,
+    entity_id     TEXT DEFAULT '',
+    details       TEXT DEFAULT '',
+    performed_by  TEXT DEFAULT '',
+    created_at    TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS conversation_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_jid    TEXT NOT NULL,
+    sender_jid  TEXT NOT NULL,
+    role        TEXT NOT NULL CHECK(role IN ('user','model')),
+    content     TEXT NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now'))
+  );
+
   -- Performance Indexes
   CREATE INDEX IF NOT EXISTS idx_messages_group_time ON messages(group_jid, timestamp);
   CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
   CREATE INDEX IF NOT EXISTS idx_tasks_status_due ON tasks(status, due_date);
   CREATE INDEX IF NOT EXISTS idx_deadlines_due ON deadlines(due_date);
   CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date);
+  CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_time, is_sent);
+  CREATE INDEX IF NOT EXISTS idx_snippets_title ON code_snippets(title);
+  CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+  CREATE INDEX IF NOT EXISTS idx_conv_chat ON conversation_history(chat_jid, created_at);
 `);
 
 // Safe migrations for tasks table
@@ -714,6 +758,177 @@ export function getCreatedTasksInRange(days = 7) {
     WHERE datetime(created_at) >= datetime(?)
     ORDER BY datetime(created_at) DESC
   `).all(cutoff);
+}
+
+// ─── Reminders ────────────────────────────────────────────────────────────────
+
+/**
+ * Create a new one-shot reminder.
+ */
+export function createReminder({ user_jid, user_name, target_jid, reminder_text, due_time }) {
+  const now = getNow();
+  const info = db.prepare(`
+    INSERT INTO reminders (user_jid, user_name, target_jid, reminder_text, due_time, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(user_jid, user_name || '', target_jid || user_jid, reminder_text, due_time, now);
+  logAudit({
+    action: 'CREATE',
+    entity_type: 'reminder',
+    entity_id: String(info.lastInsertRowid),
+    details: `${reminder_text} (due: ${due_time})`,
+    performed_by: user_name || user_jid,
+  });
+  return db.prepare('SELECT * FROM reminders WHERE id = ?').get(info.lastInsertRowid);
+}
+
+/**
+ * Get all un-sent reminders that have reached their due time.
+ */
+export function getDueReminders() {
+  const now = getNow();
+  return db.prepare(`
+    SELECT * FROM reminders
+    WHERE is_sent = 0
+      AND datetime(due_time) <= datetime(?)
+    ORDER BY datetime(due_time) ASC
+  `).all(now);
+}
+
+/**
+ * Mark a reminder as sent.
+ */
+export function markReminderSent(id) {
+  db.prepare('UPDATE reminders SET is_sent = 1 WHERE id = ?').run(id);
+}
+
+/**
+ * List pending reminders for a user.
+ */
+export function listUserReminders(user_jid) {
+  const now = getNow();
+  return db.prepare(`
+    SELECT * FROM reminders
+    WHERE user_jid = ?
+      AND is_sent = 0
+      AND datetime(due_time) >= datetime(?)
+    ORDER BY datetime(due_time) ASC
+  `).all(user_jid, now);
+}
+
+// ─── Code Snippets ────────────────────────────────────────────────────────────
+
+/**
+ * Save a code snippet with title, language, code, and optional description.
+ */
+export function saveCodeSnippet({ title, language = 'javascript', code, description = '', added_by = '' }) {
+  const now = getNow();
+  const info = db.prepare(`
+    INSERT INTO code_snippets (title, language, code, description, added_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(title, language, code, description, added_by, now);
+  logAudit({
+    action: 'SAVE',
+    entity_type: 'snippet',
+    entity_id: String(info.lastInsertRowid),
+    details: `${title} [${language}]`,
+    performed_by: added_by,
+  });
+  return db.prepare('SELECT * FROM code_snippets WHERE id = ?').get(info.lastInsertRowid);
+}
+
+/**
+ * Search code snippets by title, description, or language.
+ */
+export function searchCodeSnippets(keyword = '') {
+  if (!keyword || !keyword.trim()) {
+    return db.prepare('SELECT * FROM code_snippets ORDER BY created_at DESC LIMIT 10').all();
+  }
+  const term = `%${keyword.trim().toLowerCase()}%`;
+  return db.prepare(`
+    SELECT * FROM code_snippets
+    WHERE lower(title) LIKE ?
+       OR lower(description) LIKE ?
+       OR lower(language) LIKE ?
+    ORDER BY created_at DESC
+    LIMIT 10
+  `).all(term, term, term);
+}
+
+/**
+ * Get a specific snippet by ID.
+ */
+export function getCodeSnippetById(id) {
+  return db.prepare('SELECT * FROM code_snippets WHERE id = ?').get(id);
+}
+
+// ─── Audit Log ────────────────────────────────────────────────────────────────
+
+/**
+ * Append an entry to the audit log.
+ */
+export function logAudit({ action, entity_type, entity_id = '', details = '', performed_by = '' }) {
+  try {
+    const now = getNow();
+    db.prepare(`
+      INSERT INTO audit_log (action, entity_type, entity_id, details, performed_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(action, entity_type, String(entity_id), details, performed_by, now);
+  } catch (err) {
+    console.error('[DB] Failed to write audit log:', err.message);
+  }
+}
+
+/**
+ * Get the latest N audit log entries.
+ */
+export function getRecentAuditLogs(limit = 20) {
+  return db.prepare(`
+    SELECT * FROM audit_log
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+// ─── Rolling Multi-Turn Conversation Memory ───────────────────────────────────
+
+/**
+ * Save a conversation turn (user input or assistant reply).
+ */
+export function saveConversationTurn(chat_jid, sender_jid, role, content) {
+  try {
+    const now = getNow();
+    db.prepare(`
+      INSERT INTO conversation_history (chat_jid, sender_jid, role, content, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(chat_jid, sender_jid || '', role, content, now);
+
+    // Keep history bounded to last 20 turns per chat to avoid infinite DB growth
+    db.prepare(`
+      DELETE FROM conversation_history
+      WHERE id IN (
+        SELECT id FROM conversation_history
+        WHERE chat_jid = ?
+        ORDER BY id DESC
+        LIMIT -1 OFFSET 20
+      )
+    `).run(chat_jid);
+  } catch (err) {
+    console.error('[DB] Failed to save conversation turn:', err.message);
+  }
+}
+
+/**
+ * Get recent conversation turns for a chat (ascending order for prompting).
+ */
+export function getRecentConversationHistory(chat_jid, limit = 8) {
+  const rows = db.prepare(`
+    SELECT role, content, sender_jid, created_at
+    FROM conversation_history
+    WHERE chat_jid = ?
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(chat_jid, limit);
+  return rows.reverse();
 }
 
 export default db;
