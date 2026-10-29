@@ -1004,7 +1004,12 @@ export function isChatAuthorized(jid) {
 
   // 3. Database registered chats
   const row = db.prepare("SELECT 1 FROM authorized_chats WHERE jid = ? AND status = 'active' LIMIT 1").get(jid);
-  return !!row;
+  if (row) return true;
+
+  // 4. Any registered team member is authorized for 1-on-1 DM
+  if (isMemberRegistered(jid)) return true;
+
+  return false;
 }
 
 /**

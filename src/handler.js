@@ -360,14 +360,16 @@ export async function handleMessage(sock, msg) {
     cmd === `@bot ${name}` ||
     cmd === `/bot ${name}` ||
     cmd === `@${botNameLower} ${name}` ||
-    cmd === `/${botNameLower} ${name}`;
+    cmd === `/${botNameLower} ${name}` ||
+    (isDM && cmd === name);
 
   const isCommandWithArg = (name) =>
     cmd.startsWith(`/${name}`) ||
     cmd.startsWith(`@bot ${name}`) ||
     cmd.startsWith(`/bot ${name}`) ||
     cmd.startsWith(`@${botNameLower} ${name}`) ||
-    cmd.startsWith(`/${botNameLower} ${name}`);
+    cmd.startsWith(`/${botNameLower} ${name}`) ||
+    (isDM && (cmd.startsWith(`${name} `) || cmd === name));
 
   // ── Activation / Onboarding Command ──────────────────────────────────────
   if (isCommand('activate') || isCommand('start') || isCommand('init')) {
@@ -394,27 +396,72 @@ export async function handleMessage(sock, msg) {
       const welcome =
         `🎉 *${botDisplayName.toUpperCase()} IS NOW ACTIVE!* 🇳🇬🚀\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `Sup squad! I am *${botDisplayName}*, your AI senior teammate and engineering assistant.\n` +
+        `Sup squad! I am *${botDisplayName}*, your AI senior teammate and engineering copilot.\n` +
         `This group (*${chatName}*) is officially registered and active in my database!\n\n` +
-        `Make we get to know each other sharp sharp so I can assist properly with tasks, sprint planning, and architecture advice.\n\n` +
-        `👇 *Team, drop your intro in this format (or just reply naturally):*\n` +
+        `👋 *Step 1: Team Introductions (Auto-Stored)*\n` +
+        `Make we get to know each other sharp sharp so I can assist with tasks, code reviews, and sprint planning.\n` +
+        `👇 *Drop your intro in this format (or just reply naturally):*\n` +
         `• *Name / Nickname*\n` +
         `• *Role* (e.g. Frontend, Backend, UI/UX, Mobile, DevOps, Team Lead)\n` +
         `• *Main Stack & Skills* (e.g. React, Node.js, Flutter, Python, Figma, Docker)\n` +
         `• *What you're currently building*\n\n` +
         `_I will automatically store your profile in the Team Directory as you introduce yourselves. No manual setup needed!_ 💪\n\n` +
-        `Type */help* anytime to explore all fast commands. Let's build! 🚀`;
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🛠️ *What I Do For This Squad:*\n` +
+        `• ☀️ *Daily Standup Briefs:* Every morning at 8:00 AM.\n` +
+        `• 🎯 *Member Accountability:* 2:00 PM check-ins on overdue tasks and blockers.\n` +
+        `• 📈 *Weekly Velocity & Retros:* Every Friday at 5:00 PM.\n` +
+        `• 🚨 *Struggle Detection:* Diagnoses bottlenecks and suggests pair programming or scope cuts.\n` +
+        `• 🗳️ *Polls & Votes:* Launch consensus polls for architecture and meeting times.\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `⚡ *Key Squad Shortcuts:*\n` +
+        `• */tasks* — View all open squad tasks\n` +
+        `• */standup* — Generate an on-demand morning standup brief\n` +
+        `• */poll "Question" "Opt 1" "Opt 2"* — Launch an instant squad poll\n` +
+        `• */countdown* — Live countdown to hackathons & deadlines\n` +
+        `• */done #ID* — Mark task as done\n` +
+        `• */block #ID [reason]* — Flag task as blocked\n` +
+        `• */assign #ID [name]* — Reassign task & notify member via DM\n` +
+        `• */mytasks* — Check your personal tasks\n` +
+        `• */help* — View complete command directory\n\n` +
+        `_Tag @${botDisplayName} or reply to any message to brainstorm, debug, or plan. Let's build!_ 🚀`;
 
       await sendSafeMessage(sock, remoteJid, welcome, msg);
     } else {
       const welcomeDM =
-        `👋 *Hello, ${senderName}!* I am *${botDisplayName}* 🇳🇬🚀\n` +
-        `Your 1-on-1 private engineering assistant is now activated.\n\n` +
-        `Tell me about yourself so I can store your profile in the Team Directory:\n` +
-        `• What is your *Role* (e.g. Fullstack, Backend, Mobile)?\n` +
-        `• What are your *Skills / Tech Stack*?\n` +
-        `• What projects are you actively building?\n\n` +
-        `_You can also ask me technical questions, create tasks, or set reminders right here._ 🎯`;
+        `🤖 *${botDisplayName.toUpperCase()} — 1-ON-1 COPILOT ACTIVATED!* 🇳🇬🚀\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Sup *${senderName}*! Your private engineering assistant and productivity partner is now live.\n\n` +
+        `👋 *Step 1: Set Up Your Profile (Auto-Stored)*\n` +
+        `Tell me about yourself so I can register you in the squad directory (or update your profile):\n` +
+        `• *Role:* (e.g. Frontend, Backend, Fullstack, Mobile, DevOps, UI/UX)\n` +
+        `• *Stack:* (e.g. React, Node.js, Python, Flutter, Docker, PostgreSQL)\n` +
+        `• *Focus:* What you're currently building or tackling\n` +
+        `_Example: "Role: Backend, Stack: Node.js, PostgreSQL, Focus: Building the payment API"_\n` +
+        `↳ _I will automatically parse and save this to the Team Directory so I give you stack-tailored answers!_\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🛠️ *What I Can Do For You 1-on-1:*\n` +
+        `• 🧠 *Pair Programming & Debugging:* Paste code snippets, error logs, or SQL queries for instant diagnosis and fixes.\n` +
+        `• 📋 *Personal Task Tracking:* Add, organize, and complete your tasks privately without group clutter.\n` +
+        `• ⏰ *Smart Reminders:* Set personal reminders so you never forget tests, deploys, or reviews.\n` +
+        `• 💡 *Code Snippet Vault:* Save boilerplate, tricky regex, or reusable configs and retrieve them anytime.\n` +
+        `• ⏳ *Sprint & Hackathon Countdowns:* Stay on top of your deadlines with live countdown timers.\n` +
+        `• 🎙️ *Voice Notes & Vision:* Send voice notes to dictate tasks, or send screenshots/flyers for instant extraction.\n` +
+        `• 📊 *Group Sync:* Syncs with squad groups you're in—assignments and standups reflect here too.\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `⚡ *Essential Shortcuts & Fast Commands:*\n` +
+        `• */mytasks* — View your personal open & completed tasks\n` +
+        `• */tasks* — View all active squad tasks\n` +
+        `• */done #ID* — Mark a task as completed (e.g. \`/done #3\`)\n` +
+        `• */block #ID [reason]* — Mark a task as blocked with reason\n` +
+        `• */remind in [time] to [action]* — e.g. \`/remind in 30 mins to run tests\`\n` +
+        `• */snippet save <Title> \`\`\`code\`\`\`* — Save reusable code\n` +
+        `• */snippet [query]* — Search your saved code snippets\n` +
+        `• */countdown* — Live countdown to upcoming deadlines\n` +
+        `• */deadlines* — View upcoming sprint & hackathon dates\n` +
+        `• */notes [topic]* — Search or view saved project notes\n` +
+        `• */help* — Full list of all commands & capabilities\n\n` +
+        `_Everything we do here is private and 1-on-1. Ask me anything or paste your code to begin!_ 🚀`;
 
       await sendSafeMessage(sock, remoteJid, welcomeDM, msg);
     }
@@ -437,13 +484,18 @@ export async function handleMessage(sock, msg) {
     const tag = isPhone ? `@${senderJid.split('@')[0]}` : member.name;
     const mention = isPhone ? [senderJid] : [];
 
+    const dmTip = isDM
+      ? `\n💡 *Tip:* Type */mytasks* to view your tasks, */remind in 30 mins to [action]* for reminders, or paste code here to debug anytime!`
+      : '';
+
     const confirmMsg =
       `✅ *Profile Saved for ${tag}!* 👤\n\n` +
       `• *Name:* ${member.name}\n` +
       `• *Role:* ${member.role || 'Teammate'}\n` +
       `• *Skills:* ${member.skills || 'General Engineering'}\n` +
       (member.bio_notes ? `• *Focus:* ${member.bio_notes}\n` : '') +
-      `\n_You're officially registered in the Team Directory! I'll keep your skills in mind when delegating tasks and reviewing architecture._ 🚀`;
+      `\n_You're officially registered in the Team Directory! I'll keep your skills in mind when delegating tasks and reviewing architecture._ 🚀` +
+      dmTip;
 
     await sendSafeMessage(sock, remoteJid, confirmMsg, msg, mention);
     return;

@@ -283,9 +283,14 @@ export async function connectToWhatsApp() {
         rawText === '/activate' ||
         rawText === '/start' ||
         rawText === '/init' ||
+        rawText === 'activate' ||
+        rawText === 'start' ||
+        rawText === 'init' ||
         rawText.startsWith('/activate') ||
         rawText.startsWith('/start') ||
         rawText.startsWith('/init') ||
+        rawText.startsWith('activate ') ||
+        rawText.startsWith('start ') ||
         rawText.startsWith('@bot activate') ||
         rawText.startsWith('/bot activate') ||
         rawText.startsWith(`@${botName} activate`) ||
@@ -297,12 +302,17 @@ export async function connectToWhatsApp() {
         const isAuthorized = isChatAuthorized(senderJid) || isActivationCommand;
 
         if (!isAuthorized) {
-          // Check if zero members in directory (first-time boot allows DM setup)
-          const all = getAllMembers();
-          if (all.length > 0 && !isMemberRegistered(senderJid)) {
-            console.log(`[WhatsApp] ⛔ Unauthorized DM attempt from ${msg.pushName || senderJid}`);
-            continue;
+          // If unauthorized, send a friendly activation prompt instead of dropping silently
+          console.log(`[WhatsApp] ⛔ Unactivated DM attempt from ${msg.pushName || senderJid}`);
+          const botDisplayName = process.env.BOT_NAME || 'TeamBot';
+          try {
+            await sock.sendMessage(senderJid, {
+              text: `👋 *Hello, ${msg.pushName || 'there'}!*\n\nI am *${botDisplayName}*, your AI engineering partner.\n\nTo activate your 1-on-1 private copilot session and set up your profile, send */start* or */activate* to begin! 🚀`,
+            });
+          } catch (dmGuideErr) {
+            console.error('[WhatsApp] Could not send DM activation guide:', dmGuideErr.message);
           }
+          continue;
         }
 
         console.log(`[WhatsApp] 💬 1-on-1 Private message from ${msg.pushName || remoteJid}`);
