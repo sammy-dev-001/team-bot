@@ -524,8 +524,8 @@ function buildSystemPrompt(groupJid) {
         .join('\n')
     : '  (No upcoming deadlines)';
 
-  // Recent conversation history
-  const recent = getRecentMessages(groupJid, 30).reverse();
+  // Recent conversation history (compact window to stay within TPM rate limits)
+  const recent = getRecentMessages(groupJid, 12).reverse();
   const historyLines = recent.length
     ? recent
         .map((m) => `  [${m.timestamp}] ${m.sender_name} (${m.sender_jid}): ${m.content}`)
@@ -533,7 +533,7 @@ function buildSystemPrompt(groupJid) {
     : '  (No recent messages)';
 
   // Multi-turn rolling conversation turns
-  const turns = getRecentConversationHistory(groupJid, 8);
+  const turns = getRecentConversationHistory(groupJid, 3);
   const turnLines = turns.length
     ? turns
         .map((t) => `  [${t.role.toUpperCase()}]: ${t.content}`)
@@ -619,7 +619,7 @@ function resolveActiveProvider(hasImages = false) {
 /**
  * Executes a chat completion against an OpenAI-compatible endpoint (Groq or OpenRouter).
  */
-async function callOpenAICompatible({ endpoint, apiKey, model, messages, tools = null, temperature = 0.7, max_tokens = 1200, extraHeaders = {} }) {
+async function callOpenAICompatible({ endpoint, apiKey, model, messages, tools = null, temperature = 0.7, max_tokens = 600, extraHeaders = {} }) {
   const body = {
     model,
     messages,
@@ -630,28 +630,38 @@ async function callOpenAICompatible({ endpoint, apiKey, model, messages, tools =
     body.tools = tools;
   }
 
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      ...extraHeaders,
-    },
-    body: JSON.stringify(body),
-  });
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        ...extraHeaders,
+      },
+      body: JSON.stringify(body),
+    });
 
-  if (!res.ok) {
+    if (res.ok) {
+      return await res.json();
+    }
+
     const errText = await res.text();
     let parsed;
     try { parsed = JSON.parse(errText); } catch {}
     const msg = parsed?.error?.message || errText || `HTTP ${res.status}`;
+
+    // If rate-limited (429) and not permanently blocked, pause briefly and retry once
+    if ((res.status === 429 || res.status === 503) && attempt === 1 && !msg.includes('OTPM')) {
+      console.warn(`[AI] ${model} rate-limited (${res.status}). Pausing 2.5s before retry...`);
+      await new Promise((r) => setTimeout(r, 2500));
+      continue;
+    }
+
     const err = new Error(msg);
     err.status = res.status;
     err.code = res.status;
     throw err;
   }
-
-  return await res.json();
 }
 
 /**
@@ -918,14 +928,26 @@ async function getGroqModels(apiKey) {
     if (res.ok) {
       const data = await res.json();
       const ids = (data.data || []).map((m) => m.id);
-      // Filter out audio (whisper), guard/safeguard, and embed models
+      // Filter out audio (whisper), speech (orpheus/canopylabs), guard/safeguard, non-tool models (allam), and embed models
       const chatModels = ids.filter(
         (id) =>
           !id.includes('whisper') &&
           !id.includes('guard') &&
           !id.includes('safeguard') &&
-          !id.includes('embed')
+          !id.includes('embed') &&
+          !id.includes('orpheus') &&
+          !id.includes('canopylabs') &&
+          !id.includes('allam')
       );
+
+      // Prioritize top tool-calling models (gpt-oss-120b, gpt-oss-20b, then qwen)
+      chatModels.sort((a, b) => {
+        if (a.includes('gpt-oss-120b')) return -1;
+        if (b.includes('gpt-oss-120b')) return 1;
+        if (a.includes('gpt-oss-20b')) return -1;
+        if (b.includes('gpt-oss-20b')) return 1;
+        return 0;
+      });
 
       if (chatModels.length > 0) {
         const customModel = process.env.GROQ_MODEL;
@@ -1080,7 +1102,7 @@ async function callAICompletion({ systemPrompt, prompt, temperature = 0.7, maxTo
             { role: 'user', content: prompt },
           ],
           temperature,
-          max_tokens: maxTokens,
+          max_tokens: Math.min(maxTokens, 700),
         });
         return data.choices?.[0]?.message?.content || null;
       } catch (err) {
