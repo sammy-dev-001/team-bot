@@ -17,7 +17,7 @@ import pino from 'pino';
 import { Boom } from '@hapi/boom';
 import 'dotenv/config';
 
-import { isMemberRegistered, getAllMembers } from './db.js';
+import { isMemberRegistered, getAllMembers, isChatAuthorized } from './db.js';
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 
@@ -259,7 +259,10 @@ export async function connectToWhatsApp() {
           text.startsWith('/snippet') ||
           text.startsWith('/poll') ||
           text.startsWith('/countdown') ||
-          text.startsWith('/audit');
+          text.startsWith('/audit') ||
+          text.startsWith('/activate') ||
+          text.startsWith('/start') ||
+          text.startsWith('/init');
 
         if (!isExplicitSelfCommand) continue;
       }
@@ -267,30 +270,39 @@ export async function connectToWhatsApp() {
       const remoteJid = msg.key.remoteJid;
       const isGroup = remoteJid?.endsWith('@g.us');
 
+      // ── Message text for command check ────────────────────────────────────
+      const rawText = (
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        ''
+      ).trim().toLowerCase();
+      const botName = (process.env.BOT_NAME || 'teambot').toLowerCase();
+
+      const isActivationCommand =
+        rawText === '/activate' ||
+        rawText === '/start' ||
+        rawText === '/init' ||
+        rawText.startsWith('/activate') ||
+        rawText.startsWith('/start') ||
+        rawText.startsWith('/init') ||
+        rawText.startsWith('@bot activate') ||
+        rawText.startsWith('/bot activate') ||
+        rawText.startsWith(`@${botName} activate`) ||
+        rawText.startsWith(`/${botName} activate`);
+
       // ── Private 1-on-1 Direct Message (DM) Support & Auth Check ────────────
       if (!isGroup) {
         const senderJid = remoteJid;
-        const senderNum = senderJid?.split('@')[0];
-        const adminJids = (process.env.ADMIN_JIDS || '')
-          .split(',')
-          .map((j) => j.trim())
-          .filter(Boolean);
-
-        let isAuthorized = false;
-        if (adminJids.length > 0) {
-          // If ADMIN_JIDS is configured, only whitelisted users can DM
-          isAuthorized = adminJids.some(
-            (a) => a === senderJid || a === senderNum || `${a}@s.whatsapp.net` === senderJid
-          );
-        } else {
-          // Fallback: If no ADMIN_JIDS set, allow existing directory members or allow first-time testing
-          const all = getAllMembers();
-          isAuthorized = all.length === 0 || isMemberRegistered(senderJid);
-        }
+        const isAuthorized = isChatAuthorized(senderJid) || isActivationCommand;
 
         if (!isAuthorized) {
-          console.log(`[WhatsApp] ⛔ Unauthorized DM attempt from ${msg.pushName || senderJid}`);
-          continue;
+          // Check if zero members in directory (first-time boot allows DM setup)
+          const all = getAllMembers();
+          if (all.length > 0 && !isMemberRegistered(senderJid)) {
+            console.log(`[WhatsApp] ⛔ Unauthorized DM attempt from ${msg.pushName || senderJid}`);
+            continue;
+          }
         }
 
         console.log(`[WhatsApp] 💬 1-on-1 Private message from ${msg.pushName || remoteJid}`);
@@ -305,22 +317,20 @@ export async function connectToWhatsApp() {
       }
 
       // ── Multi-Group Chat Handling ──────────────────────────────────────────
-      const rawAllowed = process.env.ALLOWED_GROUP_JID || '';
-      const allowedGroups = rawAllowed
-        .split(',')
-        .map((g) => g.trim())
-        .filter(Boolean);
+      const isAuthorizedGroup = isChatAuthorized(remoteJid);
 
-      if (allowedGroups.length === 0) {
-        // Discovery mode: print group JIDs so the developer can configure .env
-        console.log(`\n[GROUP DISCOVERY] 📋 Message from group JID: ${remoteJid}`);
-        console.log('  → Add to ALLOWED_GROUP_JID in your .env and restart.\n');
-        continue;
+      if (!isAuthorizedGroup) {
+        if (isActivationCommand) {
+          console.log(`\n[WhatsApp] 🚀 Activation command detected from new group: ${remoteJid}`);
+        } else {
+          // Discovery mode: log unactivated group JID for developer visibility
+          console.log(`[GROUP DISCOVERY] 📋 Message from unactivated group: ${remoteJid}`);
+          console.log(`  ↳ To activate, send "/activate" or "@bot activate" directly in that group!\n`);
+          continue;
+        }
       }
 
-      if (!allowedGroups.includes(remoteJid)) continue;
-
-      // Dispatch to all registered message handlers for allowed groups
+      // Dispatch to all registered message handlers for authorized/activating groups
       for (const handler of messageHandlers) {
         try {
           await handler(sock, msg);

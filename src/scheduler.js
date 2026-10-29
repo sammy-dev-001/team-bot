@@ -35,6 +35,7 @@ import {
   getCompletedTasksInRange,
   getCreatedTasksInRange,
   getAllMembers,
+  getAllAuthorizedGroupJids,
   getDueReminders,
   markReminderSent,
   getNow,
@@ -52,11 +53,7 @@ const TIMEZONE = process.env.TIMEZONE || 'Africa/Lagos';
 // ─── Helper: parse configured target group JIDs ──────────────────────────────
 
 function getTargetGroups() {
-  const raw = process.env.ALLOWED_GROUP_JID || '';
-  return raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return getAllAuthorizedGroupJids();
 }
 
 function getAdminJids() {

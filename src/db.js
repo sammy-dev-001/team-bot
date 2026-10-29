@@ -170,6 +170,15 @@ db.exec(`
     created_at  TEXT DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS authorized_chats (
+    jid         TEXT PRIMARY KEY,
+    name        TEXT DEFAULT '',
+    chat_type   TEXT DEFAULT 'group' CHECK(chat_type IN ('group', 'dm')),
+    status      TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused')),
+    added_by    TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now'))
+  );
+
   -- Performance Indexes
   CREATE INDEX IF NOT EXISTS idx_messages_group_time ON messages(group_jid, timestamp);
   CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
@@ -929,6 +938,98 @@ export function getRecentConversationHistory(chat_jid, limit = 8) {
     LIMIT ?
   `).all(chat_jid, limit);
   return rows.reverse();
+}
+
+// ─── Authorized Chats (Dynamic Registration & Activation) ─────────────────────
+
+/**
+ * Register or re-activate a group or DM in the database.
+ */
+export function authorizeChat({ jid, name = '', chat_type = 'group', added_by = '' }) {
+  const now = getNow();
+  db.prepare(`
+    INSERT INTO authorized_chats (jid, name, chat_type, status, added_by, created_at)
+    VALUES (?, ?, ?, 'active', ?, ?)
+    ON CONFLICT(jid) DO UPDATE SET
+      name = COALESCE(NULLIF(excluded.name, ''), authorized_chats.name),
+      status = 'active'
+  `).run(jid, name || '', chat_type, added_by || '', now);
+
+  logAudit({
+    action: 'AUTHORIZE',
+    entity_type: chat_type,
+    entity_id: jid,
+    details: `Authorized ${chat_type} "${name || jid}"`,
+    performed_by: added_by || 'system',
+  });
+
+  return db.prepare('SELECT * FROM authorized_chats WHERE jid = ?').get(jid);
+}
+
+/**
+ * Deauthorize or pause a chat.
+ */
+export function deauthorizeChat(jid) {
+  db.prepare("UPDATE authorized_chats SET status = 'paused' WHERE jid = ?").run(jid);
+  logAudit({
+    action: 'DEAUTHORIZE',
+    entity_type: 'chat',
+    entity_id: jid,
+    details: 'Paused / deauthorized chat',
+    performed_by: 'system',
+  });
+}
+
+/**
+ * Check if a chat (group or DM) is authorized to use the bot.
+ */
+export function isChatAuthorized(jid) {
+  if (!jid) return false;
+  // 1. Env configured groups
+  const envGroups = (process.env.ALLOWED_GROUP_JID || '')
+    .split(',')
+    .map((g) => g.trim())
+    .filter(Boolean);
+  if (envGroups.includes(jid)) return true;
+
+  // 2. Env configured admins
+  const envAdmins = (process.env.ADMIN_JIDS || '')
+    .split(',')
+    .map((j) => j.trim())
+    .filter(Boolean);
+  const senderNum = jid.split('@')[0];
+  if (envAdmins.some((a) => a === jid || a === senderNum || `${a}@s.whatsapp.net` === jid)) {
+    return true;
+  }
+
+  // 3. Database registered chats
+  const row = db.prepare("SELECT 1 FROM authorized_chats WHERE jid = ? AND status = 'active' LIMIT 1").get(jid);
+  return !!row;
+}
+
+/**
+ * Get all authorized group JIDs (combining .env and SQLite database).
+ */
+export function getAllAuthorizedGroupJids() {
+  const envGroups = (process.env.ALLOWED_GROUP_JID || '')
+    .split(',')
+    .map((g) => g.trim())
+    .filter(Boolean);
+
+  const dbRows = db.prepare(`
+    SELECT jid FROM authorized_chats
+    WHERE chat_type = 'group' AND status = 'active'
+  `).all();
+
+  const dbGroups = dbRows.map((r) => r.jid);
+  return [...new Set([...envGroups, ...dbGroups])];
+}
+
+/**
+ * Get all authorized chats.
+ */
+export function getAllAuthorizedChats() {
+  return db.prepare("SELECT * FROM authorized_chats WHERE status = 'active' ORDER BY created_at DESC").all();
 }
 
 export default db;

@@ -14,6 +14,8 @@ import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import 'dotenv/config';
 import {
   ensureMemberExists,
+  upsertMember,
+  authorizeChat,
   logMessage,
   getOpenTasks,
   listDeadlines,
@@ -241,6 +243,49 @@ async function downloadMediaAsBase64(sock, mediaObj) {
   }
 }
 
+// ─── Automated Team Member Intro Parser ──────────────────────────────────────
+
+/**
+ * Heuristic extractor for member introductions.
+ * Matches structured intro lines or natural language phrases like:
+ * "Name: David, Role: Backend Dev, Stack: Node, Postgres"
+ * or "I am Tayo, UI/UX Designer using Figma and Tailwind"
+ */
+function parseMemberIntro(text) {
+  if (!text || text.length < 5) return null;
+
+  // Format 1: Key-value pairs (Name: ..., Role: ..., Skills/Stack: ...)
+  const hasIntroKeys = /(?:name|alias|role|title|skills|stack|tech)\s*[:=-]/i.test(text);
+  if (hasIntroKeys) {
+    const nameMatch = text.match(/(?:name|alias|nickname)\s*[:=-]\s*([^\n\r,]+)/i);
+    const roleMatch = text.match(/(?:role|title|position)\s*[:=-]\s*([^\n\r,]+)/i);
+    const skillsMatch = text.match(/(?:skills|stack|tech|technologies|tools)\s*[:=-]\s*([^\n\r]+)/i);
+    const bioMatch = text.match(/(?:building|focus|project|working on)\s*[:=-]\s*([^\n\r]+)/i);
+
+    if (roleMatch || skillsMatch) {
+      return {
+        name: nameMatch ? nameMatch[1].trim() : '',
+        role: roleMatch ? roleMatch[1].trim() : '',
+        skills: skillsMatch ? skillsMatch[1].trim() : '',
+        bio: bioMatch ? bioMatch[1].trim() : '',
+      };
+    }
+  }
+
+  // Format 2: "I am [Name], [Role] working with [Skills]"
+  const naturalMatch = text.match(/(?:i(?:'m| am)|my name is)\s+([A-Z][a-zA-Z0-9_-]+)(?:[,\s]+(?:a|an|the)\s+([a-zA-Z\s/]+?))?(?:(?:working with|skills in|using|stack:|tech:)\s+([^.\n]+))?/i);
+  if (naturalMatch && (naturalMatch[2] || naturalMatch[3])) {
+    return {
+      name: naturalMatch[1].trim(),
+      role: naturalMatch[2] ? naturalMatch[2].trim() : '',
+      skills: naturalMatch[3] ? naturalMatch[3].trim() : '',
+      bio: '',
+    };
+  }
+
+  return null;
+}
+
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 /**
@@ -324,12 +369,93 @@ export async function handleMessage(sock, msg) {
     cmd.startsWith(`@${botNameLower} ${name}`) ||
     cmd.startsWith(`/${botNameLower} ${name}`);
 
+  // ── Activation / Onboarding Command ──────────────────────────────────────
+  if (isCommand('activate') || isCommand('start') || isCommand('init')) {
+    let chatName = senderName;
+    if (isGroup) {
+      try {
+        const metadata = await sock.groupMetadata(remoteJid);
+        chatName = metadata?.subject || 'Tech Squad';
+      } catch (_) {
+        chatName = 'Tech Squad';
+      }
+    }
+
+    authorizeChat({
+      jid: remoteJid,
+      name: chatName,
+      chat_type: isGroup ? 'group' : 'dm',
+      added_by: senderName,
+    });
+
+    const botDisplayName = process.env.BOT_NAME || 'TeamBot';
+
+    if (isGroup) {
+      const welcome =
+        `🎉 *${botDisplayName.toUpperCase()} IS NOW ACTIVE!* 🇳🇬🚀\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Sup squad! I am *${botDisplayName}*, your AI senior teammate and engineering assistant.\n` +
+        `This group (*${chatName}*) is officially registered and active in my database!\n\n` +
+        `Make we get to know each other sharp sharp so I can assist properly with tasks, sprint planning, and architecture advice.\n\n` +
+        `👇 *Team, drop your intro in this format (or just reply naturally):*\n` +
+        `• *Name / Nickname*\n` +
+        `• *Role* (e.g. Frontend, Backend, UI/UX, Mobile, DevOps, Team Lead)\n` +
+        `• *Main Stack & Skills* (e.g. React, Node.js, Flutter, Python, Figma, Docker)\n` +
+        `• *What you're currently building*\n\n` +
+        `_I will automatically store your profile in the Team Directory as you introduce yourselves. No manual setup needed!_ 💪\n\n` +
+        `Type */help* anytime to explore all fast commands. Let's build! 🚀`;
+
+      await sendSafeMessage(sock, remoteJid, welcome, msg);
+    } else {
+      const welcomeDM =
+        `👋 *Hello, ${senderName}!* I am *${botDisplayName}* 🇳🇬🚀\n` +
+        `Your 1-on-1 private engineering assistant is now activated.\n\n` +
+        `Tell me about yourself so I can store your profile in the Team Directory:\n` +
+        `• What is your *Role* (e.g. Fullstack, Backend, Mobile)?\n` +
+        `• What are your *Skills / Tech Stack*?\n` +
+        `• What projects are you actively building?\n\n` +
+        `_You can also ask me technical questions, create tasks, or set reminders right here._ 🎯`;
+
+      await sendSafeMessage(sock, remoteJid, welcomeDM, msg);
+    }
+    return;
+  }
+
+  // ── Auto Member Intro Detection & Storage ────────────────────────────────
+  const introData = parseMemberIntro(text);
+  if (introData && (introData.role || introData.skills)) {
+    const memberName = introData.name || senderName || senderJid.split('@')[0];
+    const member = upsertMember({
+      jid: senderJid,
+      name: memberName,
+      role: introData.role,
+      skills: introData.skills,
+      bio_notes: introData.bio,
+    });
+
+    const isPhone = senderJid.endsWith('@s.whatsapp.net');
+    const tag = isPhone ? `@${senderJid.split('@')[0]}` : member.name;
+    const mention = isPhone ? [senderJid] : [];
+
+    const confirmMsg =
+      `✅ *Profile Saved for ${tag}!* 👤\n\n` +
+      `• *Name:* ${member.name}\n` +
+      `• *Role:* ${member.role || 'Teammate'}\n` +
+      `• *Skills:* ${member.skills || 'General Engineering'}\n` +
+      (member.bio_notes ? `• *Focus:* ${member.bio_notes}\n` : '') +
+      `\n_You're officially registered in the Team Directory! I'll keep your skills in mind when delegating tasks and reviewing architecture._ 🚀`;
+
+    await sendSafeMessage(sock, remoteJid, confirmMsg, msg, mention);
+    return;
+  }
+
   // Help command
   if (isCommand('help') || isCommand('commands')) {
     const botName = process.env.BOT_NAME || 'TeamBot';
     const helpText =
       `🤖 *${botName} Commands & Quick Guide*\n\n` +
       `*⚡ Fast Commands (Instant Response):*\n` +
+      `• */activate* — Register & bring bot to life in a group or DM\n` +
       `• */tasks* — View all active open team tasks\n` +
       `• */deadlines* — View approaching project & hackathon deadlines\n` +
       `• */countdown* — Live countdown timer for all deadlines\n` +
