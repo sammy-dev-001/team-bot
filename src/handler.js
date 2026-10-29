@@ -1052,7 +1052,7 @@ Decision Rules:
           '• */remind in 30 mins to [action]* — Set reminders\n' +
           '• */snippet [query]* — Code snippets\n' +
           '• */poll "Question" "Opt 1" "Opt 2"* — Launch polls\n\n' +
-          '_To restore full AI conversation right now, generate a fresh free key at aistudio.google.com and update GEMINI_API_KEY!_ 🚀',
+          '_To restore full AI conversation right now, plug in a free Groq key (GROQ_API_KEY from console.groq.com for 14,400 free requests/day) or update GEMINI_API_KEY!_ 🚀',
           msg
         );
       } else {

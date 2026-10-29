@@ -37,8 +37,21 @@ import {
 
 // ─── Client ──────────────────────────────────────────────────────────────────
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+// ─── Multi-Provider Client Configuration ──────────────────────────────────────
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
+const MODEL = GEMINI_MODEL;
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
+
+// Provider mode: 'auto' (default), 'groq', 'openrouter', or 'gemini'
+const AI_PROVIDER = (process.env.AI_PROVIDER || 'auto').toLowerCase();
 
 // ─── Tool declarations ────────────────────────────────────────────────────────
 
@@ -297,6 +310,32 @@ const TOOLS = [
   },
 ];
 
+// ─── OpenAI-Compatible Tool Schema Conversion ─────────────────────────────────
+
+function convertGeminiSchemaToOpenAI(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+  const res = Array.isArray(schema) ? [] : {};
+  for (const [k, v] of Object.entries(schema)) {
+    if (k === 'type' && typeof v === 'string') {
+      res[k] = v.toLowerCase();
+    } else if (typeof v === 'object' && v !== null) {
+      res[k] = convertGeminiSchemaToOpenAI(v);
+    } else {
+      res[k] = v;
+    }
+  }
+  return res;
+}
+
+const OPENAI_TOOLS = TOOLS[0].functionDeclarations.map((fn) => ({
+  type: 'function',
+  function: {
+    name: fn.name,
+    description: fn.description,
+    parameters: convertGeminiSchemaToOpenAI(fn.parameters),
+  },
+}));
+
 // ─── Tool executor ────────────────────────────────────────────────────────────
 
 /**
@@ -551,7 +590,79 @@ You have access to the last 30 messages in immediate context, plus the permanent
  * Executes generateContent with backoff retries on 503 (high demand)
  * and automatic model failover if the primary model is saturated or exceeds quota.
  */
+// ─── Provider Resolution & Core Callers ──────────────────────────────────────
+
+/**
+ * Resolves which provider should execute this turn.
+ */
+function resolveActiveProvider(hasImages = false) {
+  if (AI_PROVIDER === 'groq') return 'groq';
+  if (AI_PROVIDER === 'openrouter') return 'openrouter';
+  if (AI_PROVIDER === 'gemini') return 'gemini';
+
+  // In auto mode:
+  // If user sent images and Gemini is configured, use Gemini for multimodal vision
+  if (hasImages && GEMINI_API_KEY && ai) return 'gemini';
+
+  // For high-volume free text & tools: Groq provides 14,400 free requests/day
+  if (GROQ_API_KEY) return 'groq';
+
+  // OpenRouter offers free community models
+  if (OPENROUTER_API_KEY) return 'openrouter';
+
+  // Default to Gemini if key is present
+  if (GEMINI_API_KEY && ai) return 'gemini';
+
+  return 'none';
+}
+
+/**
+ * Executes a chat completion against an OpenAI-compatible endpoint (Groq or OpenRouter).
+ */
+async function callOpenAICompatible({ endpoint, apiKey, model, messages, tools = null, temperature = 0.7, max_tokens = 1200, extraHeaders = {} }) {
+  const body = {
+    model,
+    messages,
+    temperature,
+    max_tokens,
+  };
+  if (tools && tools.length > 0) {
+    body.tools = tools;
+  }
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      ...extraHeaders,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    let parsed;
+    try { parsed = JSON.parse(errText); } catch {}
+    const msg = parsed?.error?.message || errText || `HTTP ${res.status}`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.code = res.status;
+    throw err;
+  }
+
+  return await res.json();
+}
+
+/**
+ * Executes generateContent with backoff retries on 503 (high demand)
+ * and automatic model failover if the primary model is saturated or exceeds quota.
+ */
 async function callGeminiWithRetryAndFallback(params) {
+  if (!ai) {
+    throw new Error('Gemini API key is not configured.');
+  }
+
   const modelsToTry = [
     MODEL,
     'gemini-3.8-flash',
@@ -582,7 +693,6 @@ async function callGeminiWithRetryAndFallback(params) {
           console.warn(`[AI] ${model} high demand (503). Retrying in 1.5s (attempt ${attempt}/2)...`);
           await new Promise((r) => setTimeout(r, 1500));
         } else {
-          // If 404 (deprecated/not found) or 429 (quota exhausted on this model), try next model
           console.warn(`[AI] ${model} failed (${err.status || err.code || 'error'}). Trying fallback model...`);
           break;
         }
@@ -592,20 +702,110 @@ async function callGeminiWithRetryAndFallback(params) {
   throw lastError;
 }
 
-// ─── Main AI call with multi-step tool loop ───────────────────────────────────
+/**
+ * Multi-turn tool execution loop for OpenAI-compatible providers (Groq, OpenRouter).
+ */
+async function askAIOpenAI({ endpoint, apiKey, model, systemPrompt, userMessage, mediaData, meta = {}, extraHeaders = {} }) {
+  const messages = [
+    { role: 'system', content: systemPrompt },
+  ];
+
+  if (mediaData) {
+    const items = Array.isArray(mediaData) ? mediaData : [mediaData];
+    const imageParts = [];
+    for (const item of items) {
+      if (item?.mimeType && item?.base64) {
+        imageParts.push({
+          type: 'image_url',
+          image_url: {
+            url: `data:${item.mimeType};base64,${item.base64}`,
+          },
+        });
+      }
+    }
+    if (imageParts.length > 0) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: userMessage },
+          ...imageParts,
+        ],
+      });
+    } else {
+      messages.push({ role: 'user', content: userMessage });
+    }
+  } else {
+    messages.push({ role: 'user', content: userMessage });
+  }
+
+  let finalText = '';
+  const pendingDms = [];
+  const polls = [];
+  const toolMeta = { ...meta, chatJid: meta.chatJid, polls };
+  const MAX_ITERATIONS = 8;
+
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    const data = await callOpenAICompatible({
+      endpoint,
+      apiKey,
+      model,
+      messages,
+      tools: OPENAI_TOOLS,
+      extraHeaders,
+    });
+
+    const choice = data.choices?.[0];
+    const msg = choice?.message;
+    if (!msg) break;
+
+    const toolCalls = msg.tool_calls || [];
+    if (!toolCalls.length) {
+      finalText = msg.content || '';
+      break;
+    }
+
+    messages.push({
+      role: 'assistant',
+      content: msg.content || '',
+      tool_calls: msg.tool_calls,
+    });
+
+    for (const call of toolCalls) {
+      const name = call.function.name;
+      let args = {};
+      if (call.function.arguments) {
+        try {
+          args = typeof call.function.arguments === 'string'
+            ? JSON.parse(call.function.arguments)
+            : call.function.arguments;
+        } catch (e) {
+          console.warn(`[AI] Could not parse args for ${name}:`, e.message);
+        }
+      }
+
+      console.log(`[AI] 🔧 Calling tool (${model}): ${name}`, JSON.stringify(args));
+      const result = executeTool(name, args, pendingDms, toolMeta);
+      console.log(`[AI] ✅ Tool result:`, JSON.stringify(result));
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        content: JSON.stringify(result),
+      });
+    }
+  }
+
+  return {
+    text: finalText || '_Omo, my brain glitched for a second 🤯 Abeg try again._',
+    pendingDms,
+    polls,
+  };
+}
 
 /**
- * Core reasoning function. Accepts optional media data (images, audio voice notes, documents).
- *
- * @param {string}        groupJid       - Group JID (for context injection).
- * @param {string}        userMessage    - The text message to reason about.
- * @param {object|Array}  [mediaData]    - Optional: { mimeType, base64 } or array of media objects.
- * @returns {Promise<string>}            - Final text response to send to the group.
+ * Gemini multi-turn tool execution loop.
  */
-export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) {
-  const systemPrompt = buildSystemPrompt(groupJid);
-
-  // Build the user content parts
+async function askAIGemini(groupJid, systemPrompt, userMessage, mediaData, meta = {}) {
   const userParts = [{ text: userMessage }];
   if (mediaData) {
     const items = Array.isArray(mediaData) ? mediaData : [mediaData];
@@ -621,14 +821,13 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
     }
   }
 
-  // Conversation history for the multi-turn tool loop
   const contents = [{ role: 'user', parts: userParts }];
 
   let finalText = '';
-  const pendingDms = []; // DM notifications collected during tool calls
-  const polls = []; // Polls queued for native dispatch
+  const pendingDms = [];
+  const polls = [];
   const toolMeta = { ...meta, chatJid: groupJid, polls };
-  const MAX_ITERATIONS = 8; // Safety cap on tool loop iterations
+  const MAX_ITERATIONS = 8;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const response = await callGeminiWithRetryAndFallback({
@@ -648,7 +847,6 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
     const hasFunctionCall = parts.some((p) => p.functionCall);
 
     if (!hasFunctionCall) {
-      // No more tool calls — collect the final text
       finalText = parts
         .filter((p) => p.text)
         .map((p) => p.text)
@@ -656,14 +854,13 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
       break;
     }
 
-    // Process all function calls in this turn
     const modelTurn = { role: 'model', parts };
     const toolResultParts = [];
 
     for (const part of parts) {
       if (part.functionCall) {
         const { name, args } = part.functionCall;
-        console.log(`[AI] 🔧 Calling tool: ${name}`, JSON.stringify(args));
+        console.log(`[AI] 🔧 Calling tool (Gemini): ${name}`, JSON.stringify(args));
         const result = executeTool(name, args, pendingDms, toolMeta);
         console.log(`[AI] ✅ Tool result:`, JSON.stringify(result));
 
@@ -676,7 +873,6 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
       }
     }
 
-    // Feed the tool results back into the conversation
     contents.push(modelTurn);
     contents.push({ role: 'user', parts: toolResultParts });
   }
@@ -686,6 +882,177 @@ export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) 
     pendingDms,
     polls,
   };
+}
+
+// ─── Main AI Entrypoint with Multi-Provider Failover ──────────────────────────
+
+/**
+ * Core reasoning function. Accepts optional media data (images, audio voice notes, documents).
+ * Seamlessly routes to Groq (primary high-quota free), OpenRouter, or Gemini.
+ */
+export async function askAI(groupJid, userMessage, mediaData = null, meta = {}) {
+  const systemPrompt = buildSystemPrompt(groupJid);
+  const hasImages = mediaData && (Array.isArray(mediaData) ? mediaData.length > 0 : !!mediaData?.mimeType);
+  const provider = resolveActiveProvider(hasImages);
+
+  // 1. If Groq is primary or auto-selected
+  if (provider === 'groq') {
+    try {
+      return await askAIOpenAI({
+        endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+        apiKey: GROQ_API_KEY,
+        model: GROQ_MODEL,
+        systemPrompt,
+        userMessage,
+        mediaData,
+        meta: { ...meta, chatJid: groupJid },
+      });
+    } catch (err) {
+      console.warn('[AI] Groq failed, attempting fallback...', err.message);
+      if (!GEMINI_API_KEY && !OPENROUTER_API_KEY) throw err;
+    }
+  }
+
+  // 2. If OpenRouter is primary or auto-selected
+  if (provider === 'openrouter') {
+    try {
+      return await askAIOpenAI({
+        endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+        apiKey: OPENROUTER_API_KEY,
+        model: OPENROUTER_MODEL,
+        systemPrompt,
+        userMessage,
+        mediaData,
+        meta: { ...meta, chatJid: groupJid },
+        extraHeaders: {
+          'HTTP-Referer': 'https://github.com/sammy-dev-001/team-bot',
+          'X-Title': 'D Team Assistant',
+        },
+      });
+    } catch (err) {
+      console.warn('[AI] OpenRouter failed, attempting fallback...', err.message);
+      if (!GEMINI_API_KEY && !GROQ_API_KEY) throw err;
+    }
+  }
+
+  // 3. If Gemini is primary or auto-selected
+  if (ai) {
+    try {
+      return await askAIGemini(groupJid, systemPrompt, userMessage, mediaData, meta);
+    } catch (err) {
+      const isQuota =
+        err.status === 429 ||
+        err.code === 429 ||
+        err.message?.includes('429') ||
+        err.message?.includes('quota') ||
+        err.message?.includes('RESOURCE_EXHAUSTED');
+
+      // Seamless failover if Gemini hits daily quota:
+      if (isQuota) {
+        if (GROQ_API_KEY) {
+          console.log('[AI] 🔄 Gemini quota reached. Seamlessly failing over to Groq Llama 3.3...');
+          return await askAIOpenAI({
+            endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+            apiKey: GROQ_API_KEY,
+            model: GROQ_MODEL,
+            systemPrompt,
+            userMessage,
+            mediaData,
+            meta: { ...meta, chatJid: groupJid },
+          });
+        }
+        if (OPENROUTER_API_KEY) {
+          console.log('[AI] 🔄 Gemini quota reached. Seamlessly failing over to OpenRouter...');
+          return await askAIOpenAI({
+            endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+            apiKey: OPENROUTER_API_KEY,
+            model: OPENROUTER_MODEL,
+            systemPrompt,
+            userMessage,
+            mediaData,
+            meta: { ...meta, chatJid: groupJid },
+            extraHeaders: {
+              'HTTP-Referer': 'https://github.com/sammy-dev-001/team-bot',
+              'X-Title': 'D Team Assistant',
+            },
+          });
+        }
+      }
+      throw err;
+    }
+  }
+
+  throw new Error('No AI provider available. Set GROQ_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY in .env');
+}
+
+/**
+ * Universal text completion helper for morning briefings, standups, and retrospective reports.
+ */
+async function callAICompletion({ systemPrompt, prompt, temperature = 0.7, maxTokens = 1200 }) {
+  const provider = resolveActiveProvider(false);
+
+  if (provider === 'groq' || (provider === 'auto' && GROQ_API_KEY)) {
+    try {
+      const data = await callOpenAICompatible({
+        endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+        apiKey: GROQ_API_KEY,
+        model: GROQ_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt },
+        ],
+        temperature,
+        max_tokens: maxTokens,
+      });
+      return data.choices?.[0]?.message?.content || null;
+    } catch (err) {
+      console.warn('[AI] Groq text completion failed:', err.message);
+      if (!GEMINI_API_KEY && !OPENROUTER_API_KEY) throw err;
+    }
+  }
+
+  if (provider === 'openrouter' || (provider === 'auto' && OPENROUTER_API_KEY)) {
+    try {
+      const data = await callOpenAICompatible({
+        endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+        apiKey: OPENROUTER_API_KEY,
+        model: OPENROUTER_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt },
+        ],
+        temperature,
+        max_tokens: maxTokens,
+        extraHeaders: {
+          'HTTP-Referer': 'https://github.com/sammy-dev-001/team-bot',
+          'X-Title': 'D Team Assistant',
+        },
+      });
+      return data.choices?.[0]?.message?.content || null;
+    } catch (err) {
+      console.warn('[AI] OpenRouter text completion failed:', err.message);
+      if (!GEMINI_API_KEY) throw err;
+    }
+  }
+
+  if (ai) {
+    const response = await callGeminiWithRetryAndFallback({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        systemInstruction: systemPrompt,
+        temperature,
+        maxOutputTokens: maxTokens,
+      },
+    });
+    return (
+      response.candidates?.[0]?.content?.parts
+        ?.filter((p) => p.text)
+        .map((p) => p.text)
+        .join('') || null
+    );
+  }
+
+  throw new Error('No AI provider configured for text generation.');
 }
 
 // ─── Struggle & Accountability AI Generators ─────────────────────────────────
