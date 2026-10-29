@@ -234,7 +234,7 @@ export async function connectToWhatsApp() {
           msg.message.extendedTextMessage?.text ||
           ''
         ).trim().toLowerCase();
-        const botName = (process.env.BOT_NAME || 'teambot').toLowerCase();
+        const botName = (process.env.BOT_NAME || 'd').toLowerCase();
 
         const isExplicitSelfCommand =
           text.startsWith('@bot') ||
@@ -277,7 +277,7 @@ export async function connectToWhatsApp() {
         msg.message.imageMessage?.caption ||
         ''
       ).trim().toLowerCase();
-      const botName = (process.env.BOT_NAME || 'teambot').toLowerCase();
+      const botName = (process.env.BOT_NAME || 'd').toLowerCase();
 
       const isActivationCommand =
         rawText === '/activate' ||

@@ -165,7 +165,7 @@ function getMediaAttachment(msg) {
  */
 function isDirectTrigger(msg, botJid) {
   const text = extractMessageText(msg).trim().toLowerCase();
-  const botName = (process.env.BOT_NAME || 'teambot').toLowerCase();
+  const botName = (process.env.BOT_NAME || 'D').toLowerCase();
 
   if (
     text.startsWith('@bot') ||
@@ -191,7 +191,7 @@ function isDirectTrigger(msg, botJid) {
  * Strips leading bot invocation tags from message text for clean AI prompting.
  */
 function stripTriggerPrefix(text) {
-  const botName = (process.env.BOT_NAME || 'teambot').toLowerCase();
+  const botName = (process.env.BOT_NAME || 'D').toLowerCase();
   return text
     .replace(new RegExp(`^(@bot|/bot|@${botName}|/${botName})\\b`, 'i'), '')
     .trim();
@@ -353,7 +353,7 @@ export async function handleMessage(sock, msg) {
   // ── 4. Deterministic Fast Slash Commands (zero latency, zero AI cost) ────
 
   const cmd = text.toLowerCase().trim();
-  const botNameLower = (process.env.BOT_NAME || 'teambot').toLowerCase();
+  const botNameLower = (process.env.BOT_NAME || 'D').toLowerCase();
 
   const isCommand = (name) =>
     cmd === `/${name}` ||
@@ -390,7 +390,7 @@ export async function handleMessage(sock, msg) {
       added_by: senderName,
     });
 
-    const botDisplayName = process.env.BOT_NAME || 'TeamBot';
+    const botDisplayName = process.env.BOT_NAME || 'D';
 
     if (isGroup) {
       const welcome =
@@ -431,7 +431,7 @@ export async function handleMessage(sock, msg) {
       const welcomeDM =
         `🤖 *${botDisplayName.toUpperCase()} — 1-ON-1 COPILOT ACTIVATED!* 🇳🇬🚀\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `Sup *${senderName}*! Your private engineering assistant and productivity partner is now live.\n\n` +
+        `Sup *${senderName}*! I am *${botDisplayName}*, your private engineering assistant and productivity copilot.\n\n` +
         `👋 *Step 1: Set Up Your Profile (Auto-Stored)*\n` +
         `Tell me about yourself so I can register you in the squad directory (or update your profile):\n` +
         `• *Role:* (e.g. Frontend, Backend, Fullstack, Mobile, DevOps, UI/UX)\n` +
@@ -503,7 +503,7 @@ export async function handleMessage(sock, msg) {
 
   // Help command
   if (isCommand('help') || isCommand('commands')) {
-    const botName = process.env.BOT_NAME || 'TeamBot';
+    const botName = process.env.BOT_NAME || 'D';
     const helpText =
       `🤖 *${botName} Commands & Quick Guide*\n\n` +
       `*⚡ Fast Commands (Instant Response):*\n` +
@@ -626,7 +626,7 @@ export async function handleMessage(sock, msg) {
     const deadlinesCount = listDeadlines({ upcomingOnly: true }).length;
 
     const reply =
-      `🤖 *${process.env.BOT_NAME || 'TeamBot'} Status & Health* 🟢\n\n` +
+      `🤖 *${process.env.BOT_NAME || 'D'} Status & Health* 🟢\n\n` +
       `• *Status:* Online & Operational\n` +
       `• *Uptime:* ${uptimeStr}\n` +
       `• *Team Members:* ${membersCount} registered\n` +
@@ -1033,7 +1033,7 @@ Only chime in if:
     await sendSafeMessage(sock, remoteJid, aiText, msg);
 
     // Save model's reply into multi-turn conversation memory
-    saveConversationTurn(remoteJid, botJid || 'teambot', 'model', aiText.trim());
+    saveConversationTurn(remoteJid, botJid || 'D', 'model', aiText.trim());
 
     if (!directTrigger) {
       resetChimeIn();
