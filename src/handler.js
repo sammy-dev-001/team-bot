@@ -146,6 +146,9 @@ function getMediaAttachment(msg) {
   if (m.imageMessage) {
     return { type: 'image', mediaMsg: m.imageMessage, mimeType: m.imageMessage.mimetype || 'image/jpeg', isQuoted: false, msg };
   }
+  if (m.stickerMessage) {
+    return { type: 'sticker', mediaMsg: m.stickerMessage, mimeType: m.stickerMessage.mimetype || 'image/webp', isQuoted: false, msg };
+  }
   if (m.audioMessage) {
     return { type: 'audio', mediaMsg: m.audioMessage, mimeType: m.audioMessage.mimetype || 'audio/ogg; codecs=opus', isQuoted: false, msg };
   }
@@ -158,6 +161,9 @@ function getMediaAttachment(msg) {
   const quoted = ctx?.quotedMessage;
   if (quoted?.imageMessage) {
     return { type: 'image', mediaMsg: quoted.imageMessage, mimeType: quoted.imageMessage.mimetype || 'image/jpeg', isQuoted: true, msg };
+  }
+  if (quoted?.stickerMessage) {
+    return { type: 'sticker', mediaMsg: quoted.stickerMessage, mimeType: quoted.stickerMessage.mimetype || 'image/webp', isQuoted: true, msg };
   }
   if (quoted?.audioMessage) {
     return { type: 'audio', mediaMsg: quoted.audioMessage, mimeType: quoted.audioMessage.mimetype || 'audio/ogg; codecs=opus', isQuoted: true, msg };
@@ -231,7 +237,9 @@ async function downloadMediaAsBase64(sock, mediaObj) {
             participant: mediaObj.msg.message?.extendedTextMessage?.contextInfo?.participant,
           },
           message: {
-            [mediaObj.type === 'image'
+            [mediaObj.type === 'sticker'
+              ? 'stickerMessage'
+              : mediaObj.type === 'image'
               ? 'imageMessage'
               : mediaObj.type === 'audio'
               ? 'audioMessage'
@@ -960,7 +968,8 @@ export async function handleMessage(sock, msg) {
   const botJid = sock.user?.id ? sock.user.id.replace(':0', '') + '@s.whatsapp.net' : null;
   // In private 1-on-1 DMs, always trigger a response
   const directTrigger = isDM || isDirectTrigger(msg, botJid);
-  const orgChimeIn = !directTrigger && canChimeIn() && (shouldChimeIn(text) || hasMedia);
+  // In groups, untagged stickers do not trigger unsolicited chime-ins (to avoid spamming meme reactions)
+  const orgChimeIn = !directTrigger && canChimeIn() && (shouldChimeIn(text) || (hasMedia && mediaObj.type !== 'sticker'));
 
   if (!directTrigger && !orgChimeIn) return;
 
@@ -977,6 +986,7 @@ export async function handleMessage(sock, msg) {
   if (!userContent && mediaData) {
     if (mediaData.type === 'audio') userContent = '(sent a voice note)';
     else if (mediaData.type === 'document') userContent = '(shared a document)';
+    else if (mediaData.type === 'sticker') userContent = '(sent a sticker)';
     else userContent = '(shared an image)';
   } else if (!userContent && hasMedia) {
     userContent = '(shared an attachment)';
@@ -1002,6 +1012,8 @@ Decision Rules:
       enrichedMessage += `\n\n[VOICE NOTE ATTACHED — Listen to the audio voice note carefully. Transcribe or address what the speaker is saying, answer their question, or execute any task assignment / deadline creation requested in the audio.]`;
     } else if (mediaData.type === 'document') {
       enrichedMessage += `\n\n[DOCUMENT ATTACHED — Review the document carefully (e.g. PRD, specification, API docs, code). Provide insightful engineering feedback, answer questions, or extract any tasks / deadlines mentioned.]`;
+    } else if (mediaData.type === 'sticker') {
+      enrichedMessage += `\n\n[STICKER ATTACHED — This is a WhatsApp sticker (meme, cartoon, reaction image, or graphic). Inspect the visual, any text/caption written on the sticker, characters, and facial expression. Understand the meme or emotional reaction, and respond or banter back with authentic humor and wit as D!]`;
     } else {
       enrichedMessage += `\n\n[IMAGE ATTACHED — Review the image carefully. If it's a hackathon flyer or event with a deadline, call add_deadline. If it's a UI mockup or architecture diagram, provide constructive engineering feedback and suggest tasks for relevant teammates based on their skills.]`;
     }
