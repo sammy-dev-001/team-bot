@@ -32,6 +32,9 @@ let reconnectAttempts = 0;
 const BASE_RECONNECT_DELAY_MS = 3000;
 const MAX_RECONNECT_DELAY_MS = 60000;
 
+/** Track IDs of messages sent by the bot socket itself to prevent self-reply loops. */
+const botSentMessageIds = new Set();
+
 /** Callbacks registered by handler.js / scheduler.js */
 const messageHandlers = [];
 
@@ -100,7 +103,14 @@ export async function sendSafeMessage(sockRef, jid, text, quotedMsg = null, ment
     const payload = { text, mentions: allMentions };
     const sendOptions = quotedMsg ? { quoted: quotedMsg } : {};
 
-    await sockRef.sendMessage(jid, payload, sendOptions);
+    const sent = await sockRef.sendMessage(jid, payload, sendOptions);
+    if (sent?.key?.id) {
+      botSentMessageIds.add(sent.key.id);
+      if (botSentMessageIds.size > 200) {
+        const oldest = botSentMessageIds.values().next().value;
+        botSentMessageIds.delete(oldest);
+      }
+    }
 
     // 5. Clear composing presence
     await sockRef.sendPresenceUpdate('paused', jid);
@@ -129,13 +139,20 @@ export async function sendPollMessage(sockRef, jid, name, values, selectableCoun
       console.warn('[sendPollMessage] Polls require at least 2 options.');
       return;
     }
-    await sockRef.sendMessage(jid, {
+    const sent = await sockRef.sendMessage(jid, {
       poll: {
         name,
         values: validOptions,
         selectableCount: Math.max(1, Math.min(selectableCount, validOptions.length)),
       },
     });
+    if (sent?.key?.id) {
+      botSentMessageIds.add(sent.key.id);
+      if (botSentMessageIds.size > 200) {
+        const oldest = botSentMessageIds.values().next().value;
+        botSentMessageIds.delete(oldest);
+      }
+    }
     console.log(`[WhatsApp] 📊 Sent native poll to ${jid}: "${name}" (${validOptions.length} options)`);
   } catch (err) {
     console.error('[sendPollMessage] Failed to send poll:', err.message);
@@ -160,7 +177,7 @@ export async function connectToWhatsApp() {
   if (sock?.ev) {
     try {
       sock.ev.removeAllListeners();
-    } catch (_) {}
+    } catch (_) { }
   }
 
   const { version } = await fetchLatestBaileysVersion();
@@ -223,58 +240,34 @@ export async function connectToWhatsApp() {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      // Skip status broadcasts or empty messages
+      // 1. Skip status broadcasts or empty messages
       if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
 
-      // If message is from the bot's own linked phone, only process if explicitly triggered
-      // (allows the developer to test from their own phone without the bot looping on its own replies)
-      if (msg.key.fromMe) {
-        const text = (
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          ''
-        ).trim().toLowerCase();
-        const botName = (process.env.BOT_NAME || 'd').toLowerCase();
-
-        const isExplicitSelfCommand =
-          text.startsWith('@bot') ||
-          text.startsWith('/bot') ||
-          text.startsWith(`@${botName}`) ||
-          text.startsWith(`/${botName}`) ||
-          text.startsWith('/tasks') ||
-          text.startsWith('/deadlines') ||
-          text.startsWith('/notes') ||
-          text.startsWith('/standup') ||
-          text.startsWith('/status') ||
-          text.startsWith('/ping') ||
-          text.startsWith('/help') ||
-          text.startsWith('/mytasks') ||
-          text.startsWith('/done') ||
-          text.startsWith('/progress') ||
-          text.startsWith('/block') ||
-          text.startsWith('/assign') ||
-          text.startsWith('/overdue') ||
-          text.startsWith('/blocked') ||
-          text.startsWith('/remind') ||
-          text.startsWith('/snippet') ||
-          text.startsWith('/poll') ||
-          text.startsWith('/countdown') ||
-          text.startsWith('/audit') ||
-          text.startsWith('/activate') ||
-          text.startsWith('/start') ||
-          text.startsWith('/init');
-
-        if (!isExplicitSelfCommand) continue;
+      // 2. Ignore messages sent by the bot socket itself (prevents infinite echo loops)
+      if (msg.key.id && botSentMessageIds.has(msg.key.id)) {
+        botSentMessageIds.delete(msg.key.id);
+        continue;
       }
 
-      const remoteJid = msg.key.remoteJid;
-      const isGroup = remoteJid?.endsWith('@g.us');
+      // 3. Unwrap ephemeral, view-once, and caption wrappers
+      const messageContent =
+        msg.message.ephemeralMessage?.message ||
+        msg.message.viewOnceMessage?.message ||
+        msg.message.viewOnceMessageV2?.message ||
+        msg.message.documentWithCaptionMessage?.message ||
+        msg.message;
+
+      const rawRemoteJid = msg.key.remoteJid;
+      const remoteJid = jidNormalizedUser(rawRemoteJid);
+      const isGroup = rawRemoteJid?.endsWith('@g.us') || remoteJid?.endsWith('@g.us');
 
       // ── Message text for command check ────────────────────────────────────
       const rawText = (
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
+        messageContent.conversation ||
+        messageContent.extendedTextMessage?.text ||
+        messageContent.imageMessage?.caption ||
+        messageContent.videoMessage?.caption ||
+        messageContent.documentMessage?.caption ||
         ''
       ).trim().toLowerCase();
       const botName = (process.env.BOT_NAME || 'd').toLowerCase();
@@ -291,18 +284,39 @@ export async function connectToWhatsApp() {
         rawText.startsWith('/init') ||
         rawText.startsWith('activate ') ||
         rawText.startsWith('start ') ||
-        rawText.startsWith('@bot activate') ||
-        rawText.startsWith('/bot activate') ||
-        rawText.startsWith(`@${botName} activate`) ||
-        rawText.startsWith(`/${botName} activate`);
+        rawText.startsWith('@bot') ||
+        rawText.startsWith('/bot') ||
+        rawText.startsWith(`@${botName}`) ||
+        rawText.startsWith(`/${botName}`) ||
+        rawText.startsWith(`${botName} `) ||
+        rawText.startsWith(`${botName},`) ||
+        rawText.startsWith(`${botName}:`);
 
       // ── Private 1-on-1 Direct Message (DM) Support & Auth Check ────────────
       if (!isGroup) {
         const senderJid = remoteJid;
-        const isAuthorized = isChatAuthorized(senderJid) || isActivationCommand;
+        const adminJids = (process.env.ADMIN_JIDS || '')
+          .split(',')
+          .map((j) => j.trim())
+          .filter(Boolean);
+
+        let isAuthorized = false;
+        if (adminJids.length > 0) {
+          const senderNum = senderJid?.split('@')[0];
+          isAuthorized =
+            adminJids.some(
+              (a) => a === senderJid || a === senderNum || `${a}@s.whatsapp.net` === senderJid
+            ) ||
+            isChatAuthorized(rawRemoteJid) ||
+            isChatAuthorized(senderJid) ||
+            isActivationCommand;
+        } else {
+          // If no ADMIN_JIDS whitelist configured: all 1-on-1 DMs are welcomed!
+          isAuthorized = true;
+        }
 
         if (!isAuthorized) {
-          console.log(`[WhatsApp] ⛔ Unauthorized/unactivated DM ignored from ${msg.pushName || senderJid}`);
+          console.log(`[WhatsApp] ⛔ Unauthorized DM ignored from ${msg.pushName || senderJid}`);
           continue;
         }
 
@@ -318,15 +332,17 @@ export async function connectToWhatsApp() {
       }
 
       // ── Multi-Group Chat Handling ──────────────────────────────────────────
-      const isAuthorizedGroup = isChatAuthorized(remoteJid);
+      const isAuthorizedGroup =
+        isChatAuthorized(rawRemoteJid) ||
+        isChatAuthorized(remoteJid);
 
       if (!isAuthorizedGroup) {
         if (isActivationCommand) {
-          console.log(`\n[WhatsApp] 🚀 Activation command detected from new group: ${remoteJid}`);
+          console.log(`\n[WhatsApp] 🚀 Activation command detected from new group: ${rawRemoteJid}`);
         } else {
           // Discovery mode: log unactivated group JID for developer visibility
-          console.log(`[GROUP DISCOVERY] 📋 Message from unactivated group: ${remoteJid}`);
-          console.log(`  ↳ To activate, send "/activate" or "@bot activate" directly in that group!\n`);
+          console.log(`[GROUP DISCOVERY] 📋 Message from unactivated group: ${rawRemoteJid}`);
+          console.log(`  ↳ To activate, send "/activate" or "@${botName} activate" directly in that group!\n`);
           continue;
         }
       }

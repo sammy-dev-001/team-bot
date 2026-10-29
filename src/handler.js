@@ -45,8 +45,8 @@ import { sendSafeMessage, sendPollMessage } from './whatsapp.js';
 const cooldown = {
   messagesSinceLastChimeIn: 0,
   lastChimeInAt: 0,
-  CHIME_IN_COOLDOWN_MS: 15 * 60 * 1000, // 15 minutes
-  CHIME_IN_EVERY_N_MESSAGES: 15,          // at most once per 15 messages
+  CHIME_IN_COOLDOWN_MS: 2 * 60 * 1000, // 2 minutes
+  CHIME_IN_EVERY_N_MESSAGES: 3,         // or every 3 messages
 };
 
 /**
@@ -70,31 +70,45 @@ function resetChimeIn() {
 
 /**
  * Lightweight heuristic: should the bot organically chime in on this message?
- * We look for signals that a human expert would want to weigh in on.
+ * Looks for questions, technical discussion, bugs, planning, or natural cues.
  */
 function shouldChimeIn(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
 
   const technicalSignals = [
-    /\b(bug|error|exception|crash|fix|broken|issue|problem|help)\b/,
-    /\b(api|database|schema|endpoint|deploy|server|docker|cloud|ci\/cd)\b/,
-    /\b(react|node|python|typescript|sql|mongodb|firebase|redis|aws|gcp)\b/,
-    /\b(how do|how can|why does|what's the best|which approach|should we)\b/,
-    /\b(architecture|design|pattern|refactor|performance|optimize)\b/,
-    /\b(hackathon|deadline|submission|milestone|launch|release)\b/,
+    /\b(bug|error|exception|crash|fix|broken|issue|problem|help|stuck|failing|blocker|blocked)\b/,
+    /\b(api|database|schema|endpoint|deploy|server|docker|cloud|ci\/cd|backend|frontend)\b/,
+    /\b(react|node|python|typescript|sql|mongodb|firebase|redis|aws|gcp|flutter|tailwind)\b/,
+    /\b(how do|how can|why does|what's the best|which approach|should we|anyone know|who can)\b/,
+    /\b(architecture|design|pattern|refactor|performance|optimize|structure)\b/,
+    /\b(hackathon|deadline|submission|milestone|launch|release|project)\b/,
     /\b(meeting|standup|planning|sprint|scrum|kanban)\b/,
-    /\?/, // Any question mark is a potential cue
+    /\?/, // Any question mark
+    /\b(d)\b/i, // Mentioning D naturally
   ];
 
   const casualSignals = [
-    /\b(stressed|tired|overwhelmed|panic|scared|nervous|excited)\b/,
+    /\b(stressed|tired|overwhelmed|panic|scared|nervous|excited|cooking)\b/,
     /\b(done|finished|completed|shipped|deployed|live)\b/,
     /🚀|🔥|💡|😭|😅|🤯|🎉/,
   ];
 
   const hasSignal = [...technicalSignals, ...casualSignals].some((r) => r.test(lower));
   return hasSignal;
+}
+
+/**
+ * Helper to unwrap ephemeral, viewOnce, or documentWithCaption wrappers.
+ */
+function getUnwrappedMessage(msg) {
+  let m = msg?.message;
+  if (!m) return null;
+  if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+  if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
+  if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+  if (m.documentWithCaptionMessage?.message) m = m.documentWithCaptionMessage.message;
+  return m;
 }
 
 // ─── Message text extractor ───────────────────────────────────────────────────
@@ -104,7 +118,7 @@ function shouldChimeIn(text) {
  * message types (text, extended text, image caption, audio, document, etc.).
  */
 function extractMessageText(msg) {
-  const m = msg.message;
+  const m = getUnwrappedMessage(msg);
   if (!m) return '';
 
   return (
@@ -125,7 +139,7 @@ function extractMessageText(msg) {
  * Returns media metadata if the message contains an image, audio voice note, or document.
  */
 function getMediaAttachment(msg) {
-  const m = msg.message;
+  const m = getUnwrappedMessage(msg);
   if (!m) return null;
 
   // Direct media
@@ -171,7 +185,11 @@ function isDirectTrigger(msg, botJid) {
     text.startsWith('@bot') ||
     text.startsWith('/bot') ||
     text.startsWith(`@${botName}`) ||
-    text.startsWith(`/${botName}`)
+    text.startsWith(`/${botName}`) ||
+    text.startsWith(`${botName} `) ||
+    text.startsWith(`${botName},`) ||
+    text.startsWith(`${botName}:`) ||
+    /^(?:hey|yo|sup|hello|ask)\s+d\b/i.test(text)
   ) {
     return true;
   }
@@ -193,7 +211,7 @@ function isDirectTrigger(msg, botJid) {
 function stripTriggerPrefix(text) {
   const botName = (process.env.BOT_NAME || 'D').toLowerCase();
   return text
-    .replace(new RegExp(`^(@bot|/bot|@${botName}|/${botName})\\b`, 'i'), '')
+    .replace(new RegExp(`^(?:@bot|/bot|@${botName}|/${botName}|(?:hey|yo|sup|hello)\\s+${botName}|${botName})[,:]?\\s*`, 'i'), '')
     .trim();
 }
 
@@ -394,74 +412,65 @@ export async function handleMessage(sock, msg) {
 
     if (isGroup) {
       const welcome =
-        `🎉 *${botDisplayName.toUpperCase()} IS NOW ACTIVE!* 🇳🇬🚀\n` +
+        `Yo squad! *${botDisplayName}* is in the building 🇳🇬🚀\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `Sup squad! I am *${botDisplayName}*, your AI senior teammate and engineering copilot.\n` +
-        `This group (*${chatName}*) is officially registered and active in my database!\n\n` +
-        `👋 *Step 1: Team Introductions (Auto-Stored)*\n` +
-        `Make we get to know each other sharp sharp so I can assist with tasks, code reviews, and sprint planning.\n` +
-        `👇 *Drop your intro in this format (or just reply naturally):*\n` +
-        `• *Name / Nickname*\n` +
-        `• *Role* (e.g. Frontend, Backend, UI/UX, Mobile, DevOps, Team Lead)\n` +
-        `• *Main Stack & Skills* (e.g. React, Node.js, Flutter, Python, Figma, Docker)\n` +
-        `• *What you're currently building*\n\n` +
-        `_I will automatically store your profile in the Team Directory as you introduce yourselves. No manual setup needed!_ 💪\n\n` +
+        `I'm *${botDisplayName}* — your active teammate for *${chatName}*.\n` +
+        `I'm here to plan with you guys, track tasks, debug issues, and make sure nobody is slacking.\n\n` +
+        `👋 *Make we know who and who dey inside this space sharp sharp:*\n` +
+        `Drop a quick intro (or just reply naturally):\n` +
+        `• *Name / Alias*\n` +
+        `• *Role* (Frontend, Backend, Mobile, UI/UX, DevOps, Lead, etc.)\n` +
+        `• *Stack / Tools* (React, Node, Python, Figma, Flutter, etc.)\n` +
+        `• *What you're cooking right now*\n\n` +
+        `_I'll remember everyone automatically in my directory — zero stress!_ 💪\n\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `🛠️ *What I Do For This Squad:*\n` +
-        `• ☀️ *Daily Standup Briefs:* Every morning at 8:00 AM.\n` +
-        `• 🎯 *Member Accountability:* 2:00 PM check-ins on overdue tasks and blockers.\n` +
-        `• 📈 *Weekly Velocity & Retros:* Every Friday at 5:00 PM.\n` +
-        `• 🚨 *Struggle Detection:* Diagnoses bottlenecks and suggests pair programming or scope cuts.\n` +
-        `• 🗳️ *Polls & Votes:* Launch consensus polls for architecture and meeting times.\n\n` +
+        `🛠️ *What I got you guys covered on:*\n` +
+        `• ☀️ *Morning Standups:* 8:00 AM daily brief to start the day sharp.\n` +
+        `• 🎯 *Accountability Check:* 2:00 PM check-in on overdue tasks & blockers (no dulling!).\n` +
+        `• 📈 *Weekly Retros:* 5:00 PM every Friday to celebrate what got shipped.\n` +
+        `• 🚨 *Struggle Detection:* I step in with ideas or suggestions if things get stuck.\n` +
+        `• 🗳️ *Team Polls:* Instant polls to make quick decisions.\n\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `⚡ *Key Squad Shortcuts:*\n` +
-        `• */tasks* — View all open squad tasks\n` +
-        `• */standup* — Generate an on-demand morning standup brief\n` +
-        `• */poll "Question" "Opt 1" "Opt 2"* — Launch an instant squad poll\n` +
-        `• */countdown* — Live countdown to hackathons & deadlines\n` +
-        `• */done #ID* — Mark task as done\n` +
-        `• */block #ID [reason]* — Flag task as blocked\n` +
-        `• */assign #ID [name]* — Reassign task & notify member via DM\n` +
-        `• */mytasks* — Check your personal tasks\n` +
-        `• */help* — View complete command directory\n\n` +
-        `_Tag @${botDisplayName} or reply to any message to brainstorm, debug, or plan. Let's build!_ 🚀`;
+        `⚡ *Quick Shortcuts:*\n` +
+        `• */tasks* — See all open squad tasks\n` +
+        `• */standup* — Drop a standup brief anytime\n` +
+        `• */poll "Question" "Opt 1" "Opt 2"* — Create a poll\n` +
+        `• */countdown* — Check upcoming deadline clocks\n` +
+        `• */done #ID* — Tick off a task when you finish\n` +
+        `• */help* — See all available shortcuts\n\n` +
+        `_You can tag @${botDisplayName}, reply to my messages, or just talk normally in the group — I dey listen. Let's build!_ 🚀`;
 
       await sendSafeMessage(sock, remoteJid, welcome, msg);
     } else {
       const welcomeDM =
-        `🤖 *${botDisplayName.toUpperCase()} — 1-ON-1 COPILOT ACTIVATED!* 🇳🇬🚀\n` +
+        `Hey *${senderName}*! I'm *${botDisplayName}* 🇳🇬✨\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `Sup *${senderName}*! I am *${botDisplayName}*, your private engineering assistant and productivity copilot.\n\n` +
-        `👋 *Step 1: Set Up Your Profile (Auto-Stored)*\n` +
-        `Tell me about yourself so I can register you in the squad directory (or update your profile):\n` +
-        `• *Role:* (e.g. Frontend, Backend, Fullstack, Mobile, DevOps, UI/UX)\n` +
-        `• *Stack:* (e.g. React, Node.js, Python, Flutter, Docker, PostgreSQL)\n` +
-        `• *Focus:* What you're currently building or tackling\n` +
-        `_Example: "Role: Backend, Stack: Node.js, PostgreSQL, Focus: Building the payment API"_\n` +
-        `↳ _I will automatically parse and save this to the Team Directory so I give you stack-tailored answers!_\n\n` +
+        `We're officially connected 1-on-1. Think of me as your personal partner in crime — here to bounce ideas with, organize your tasks, set reminders, debug code, or just keep you productive without the noise.\n\n` +
+        `👋 *Quick check-in so I know your vibe:*\n` +
+        `Tell me a little about yourself:\n` +
+        `• *Role:* (Frontend, Backend, Design, Mobile, PM, etc.)\n` +
+        `• *Stack / Tools:* What you love working with\n` +
+        `• *Current Focus:* What you're building right now\n` +
+        `_Example: "Role: Backend, Stack: Node & Postgres, Focus: Building the payment flow"_\n` +
+        `↳ _I'll save your profile automatically so my help is always personalized to your style!_\n\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `🛠️ *What I Can Do For You 1-on-1:*\n` +
-        `• 🧠 *Pair Programming & Debugging:* Paste code snippets, error logs, or SQL queries for instant diagnosis and fixes.\n` +
-        `• 📋 *Personal Task Tracking:* Add, organize, and complete your tasks privately without group clutter.\n` +
-        `• ⏰ *Smart Reminders:* Set personal reminders so you never forget tests, deploys, or reviews.\n` +
-        `• 💡 *Code Snippet Vault:* Save boilerplate, tricky regex, or reusable configs and retrieve them anytime.\n` +
-        `• ⏳ *Sprint & Hackathon Countdowns:* Stay on top of your deadlines with live countdown timers.\n` +
-        `• 🎙️ *Voice Notes & Vision:* Send voice notes to dictate tasks, or send screenshots/flyers for instant extraction.\n` +
-        `• 📊 *Group Sync:* Syncs with squad groups you're in—assignments and standups reflect here too.\n\n` +
+        `🛠️ *What you can use me for here:*\n` +
+        `• 💡 *Brainstorm & Fix Bugs:* Paste any code, error, or idea — we'll figure it out together.\n` +
+        `• 📋 *Personal To-Dos:* Manage your private tasks without cluttering group chats.\n` +
+        `• ⏰ *Quick Reminders:* Set reminders so you don't forget things (\`/remind in 30 mins to...\`).\n` +
+        `• 💾 *Snippet Vault:* Save useful code or notes and grab them whenever you need them.\n` +
+        `• ⏳ *Deadlines & Countdowns:* Keep track of sprint goals & hackathon clocks.\n` +
+        `• 🎙️ *Voice Notes:* Send me voice notes if you're lazy to type — I listen!\n\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `⚡ *Essential Shortcuts & Fast Commands:*\n` +
-        `• */mytasks* — View your personal open & completed tasks\n` +
-        `• */tasks* — View all active squad tasks\n` +
-        `• */done #ID* — Mark a task as completed (e.g. \`/done #3\`)\n` +
-        `• */block #ID [reason]* — Mark a task as blocked with reason\n` +
-        `• */remind in [time] to [action]* — e.g. \`/remind in 30 mins to run tests\`\n` +
-        `• */snippet save <Title> \`\`\`code\`\`\`* — Save reusable code\n` +
-        `• */snippet [query]* — Search your saved code snippets\n` +
-        `• */countdown* — Live countdown to upcoming deadlines\n` +
-        `• */deadlines* — View upcoming sprint & hackathon dates\n` +
-        `• */notes [topic]* — Search or view saved project notes\n` +
-        `• */help* — Full list of all commands & capabilities\n\n` +
-        `_Everything we do here is private and 1-on-1. Ask me anything or paste your code to begin!_ 🚀`;
+        `⚡ *Your Quick Shortcuts:*\n` +
+        `• */mytasks* (or just \`mytasks\`) — See your open tasks\n` +
+        `• */done #ID* — Tick off a completed task\n` +
+        `• */remind in [time] to [action]* — e.g. \`/remind in 45 mins to push code\`\n` +
+        `• */snippet save <Title> \`\`\`code\`\`\`* — Save useful code\n` +
+        `• */snippet [search]* — Search your saved snippets\n` +
+        `• */countdown* — Live countdown to deadlines\n` +
+        `• */help* — See everything I can do\n\n` +
+        `_Just chat with me like a teammate. What are you working on today?_ 🚀`;
 
       await sendSafeMessage(sock, remoteJid, welcomeDM, msg);
     }
@@ -951,12 +960,9 @@ export async function handleMessage(sock, msg) {
   const botJid = sock.user?.id ? sock.user.id.replace(':0', '') + '@s.whatsapp.net' : null;
   // In private 1-on-1 DMs, always trigger a response
   const directTrigger = isDM || isDirectTrigger(msg, botJid);
-  const orgChimeIn = !directTrigger && canChimeIn() && shouldChimeIn(text);
+  const orgChimeIn = !directTrigger && canChimeIn() && (shouldChimeIn(text) || hasMedia);
 
-  if (!directTrigger && !orgChimeIn && !hasMedia) return;
-
-  // For media with no text, only analyze if directly triggered or chime is ok
-  if (hasMedia && !text && !directTrigger && !orgChimeIn) return;
+  if (!directTrigger && !orgChimeIn) return;
 
   // ── 6. Handle media multimodal download (image, audio, document) ─────────
 
@@ -981,12 +987,14 @@ export async function handleMessage(sock, msg) {
     : `[${senderName} says in group]: ${userContent}`;
 
   if (!directTrigger) {
-    enrichedMessage = `[ORGANIC — Evaluate if worth responding] ${enrichedMessage}
+    enrichedMessage = `[ORGANIC GROUP ENGAGEMENT — You were NOT explicitly tagged. Evaluate if you should weigh in]
+${senderName} said in group: "${userContent}"
 
-Only chime in if:
-- This is a technical question, architecture discussion, bug, or planning matter where you can add clear value.
-- Or someone needs quick help or encouragement.
-- Otherwise, if no reply is needed or someone else already handled it, respond with exactly: SKIP`;
+Decision Rules:
+- If this is a question, a bug or blocker, technical discussion, someone sharing progress/frustration, deadline talk, or where your advice adds value: CHIME IN naturally and helpfully as D.
+- Speak casually, warmly, like an experienced friendly teammate who is active in the room.
+- If it's purely 2-person private chit-chat, a trivial greeting, or already answered completely: respond with ONLY the single word: SKIP
+- Never say "I'm chiming in because...". Just speak directly as D.`;
   }
 
   if (mediaData) {
