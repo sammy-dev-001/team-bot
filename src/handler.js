@@ -1032,7 +1032,32 @@ Decision Rules:
   } catch (err) {
     console.error('[Handler] AI call failed:', err.message);
     if (directTrigger) {
-      await sendSafeMessage(sock, remoteJid, '_Omo, my brain glitched for a second 🤯 Abeg try again._', msg);
+      const isQuota =
+        err.status === 429 ||
+        err.code === 429 ||
+        err.message?.includes('429') ||
+        err.message?.includes('quota') ||
+        err.message?.includes('RESOURCE_EXHAUSTED');
+
+      if (isQuota) {
+        await sendSafeMessage(
+          sock,
+          remoteJid,
+          '⚠️ *Gemini Daily Quota Limit Hit!* ⏳\n\n' +
+          'The daily free quota on our Gemini API key has been exhausted for today.\n\n' +
+          '💡 *Good news:* All fast commands still work 100% with zero quota:\n' +
+          '• */tasks* — View open tasks\n' +
+          '• */countdown* — Deadline clocks\n' +
+          '• */done #ID* — Complete a task\n' +
+          '• */remind in 30 mins to [action]* — Set reminders\n' +
+          '• */snippet [query]* — Code snippets\n' +
+          '• */poll "Question" "Opt 1" "Opt 2"* — Launch polls\n\n' +
+          '_To restore full AI conversation right now, generate a fresh free key at aistudio.google.com and update GEMINI_API_KEY!_ 🚀',
+          msg
+        );
+      } else {
+        await sendSafeMessage(sock, remoteJid, '_Omo, my brain glitched for a second 🤯 Abeg try again._', msg);
+      }
     }
     return;
   }

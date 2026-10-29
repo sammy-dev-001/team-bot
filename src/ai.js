@@ -549,12 +549,16 @@ You have access to the last 30 messages in immediate context, plus the permanent
 
 /**
  * Executes generateContent with backoff retries on 503 (high demand)
- * and automatic model failover if the primary model is saturated.
+ * and automatic model failover if the primary model is saturated or exceeds quota.
  */
 async function callGeminiWithRetryAndFallback(params) {
-  const modelsToTry = [MODEL];
-  if (!modelsToTry.includes('gemini-2.5-flash')) modelsToTry.push('gemini-2.5-flash');
-  if (!modelsToTry.includes('gemini-2.0-flash')) modelsToTry.push('gemini-2.0-flash');
+  const modelsToTry = [
+    MODEL,
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.5-flash',
+    'gemini-3.1-flash-lite',
+  ].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
   let lastError;
   for (const model of modelsToTry) {
@@ -578,11 +582,12 @@ async function callGeminiWithRetryAndFallback(params) {
           console.warn(`[AI] ${model} high demand (503). Retrying in 1.5s (attempt ${attempt}/2)...`);
           await new Promise((r) => setTimeout(r, 1500));
         } else {
-          throw err;
+          // If 404 (deprecated/not found) or 429 (quota exhausted on this model), try next model
+          console.warn(`[AI] ${model} failed (${err.status || err.code || 'error'}). Trying fallback model...`);
+          break;
         }
       }
     }
-    console.warn(`[AI] ${model} currently saturated. Trying alternative model...`);
   }
   throw lastError;
 }
