@@ -10,7 +10,7 @@
 //    • Multimodal media analysis (images, audio voice notes, documents)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, jidNormalizedUser } from '@whiskeysockets/baileys';
 import 'dotenv/config';
 import {
   ensureMemberExists,
@@ -179,46 +179,101 @@ function getMediaAttachment(msg) {
 
 /**
  * Returns true if the message is directly targeting the bot:
- *  - Starts with @bot or /bot or @BOT_NAME or /BOT_NAME (case-insensitive)
- *  - Is a direct reply to one of the bot's messages
- *  - @mentions the bot's own JID
+ *  - Native WhatsApp @mention in mentionedJid (supports phone JID and LID)
+ *  - Direct reply to one of the bot's messages
+ *  - Explicit @bot, /bot, @D, /D, or bot's phone number tag anywhere in the message
+ *  - Starts with bot name ("D ...", "Hey D ...", "D, ...")
  */
-function isDirectTrigger(msg, botJid) {
+function isDirectTrigger(msg, sock) {
+  const m = getUnwrappedMessage(msg);
   const text = extractMessageText(msg).trim().toLowerCase();
   const botName = (process.env.BOT_NAME || 'D').toLowerCase();
 
+  // 1. Gather all possible bot identifiers (normalized phone JID, raw JID, LID)
+  const botNormalizedJid = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
+  const botPhone = botNormalizedJid ? botNormalizedJid.split('@')[0] : null;
+  const botLid = sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
+
+  const botIds = new Set([
+    sock?.user?.id,
+    botNormalizedJid,
+    botLid,
+    sock?.user?.lid,
+  ].filter(Boolean));
+
+  // 2. Check contextInfo across message types (supports ephemeral/disappearing messages)
+  const ctx =
+    m?.extendedTextMessage?.contextInfo ||
+    m?.imageMessage?.contextInfo ||
+    m?.videoMessage?.contextInfo ||
+    m?.documentMessage?.contextInfo ||
+    m?.stickerMessage?.contextInfo ||
+    msg?.message?.extendedTextMessage?.contextInfo;
+
+  // 2a. Native WhatsApp @mentions
+  const mentions = ctx?.mentionedJid || [];
+  for (const mention of mentions) {
+    const norm = jidNormalizedUser(mention);
+    if (botIds.has(mention) || botIds.has(norm)) {
+      return true;
+    }
+  }
+
+  // 2b. Direct reply to bot's message
+  if (ctx?.participant) {
+    const normParticipant = jidNormalizedUser(ctx.participant);
+    if (botIds.has(ctx.participant) || botIds.has(normParticipant)) {
+      return true;
+    }
+  }
+
+  // 3. Text triggers:
+  // 3a. Phone tag inserted by WhatsApp (e.g. "@2348146829758")
+  if (botPhone && text.includes(`@${botPhone}`)) {
+    return true;
+  }
+
+  // 3b. Name tag anywhere in message: "@D", "@d", or "@bot"
+  const atNameRegex = new RegExp(`(?:^|\\s)@${botName}\\b`, 'i');
+  if (atNameRegex.test(text) || /(?:^|\s)@bot\b/i.test(text)) {
+    return true;
+  }
+
+  // 3c. Message begins with bot name or salutation
   if (
-    text.startsWith('@bot') ||
-    text.startsWith('/bot') ||
     text.startsWith(`@${botName}`) ||
     text.startsWith(`/${botName}`) ||
     text.startsWith(`${botName} `) ||
     text.startsWith(`${botName},`) ||
     text.startsWith(`${botName}:`) ||
-    /^(?:hey|yo|sup|hello|ask)\s+d\b/i.test(text)
+    text === botName ||
+    text.startsWith('@bot') ||
+    text.startsWith('/bot') ||
+    new RegExp(`^(?:hey|yo|sup|hello|ask)\\s+${botName}\\b`, 'i').test(text)
   ) {
     return true;
   }
-
-  // Replied-to message from the bot
-  const ctx = msg.message?.extendedTextMessage?.contextInfo;
-  if (ctx?.participant && botJid && ctx.participant === botJid) return true;
-
-  // @mentioned by JID
-  const mentions = ctx?.mentionedJid || [];
-  if (botJid && mentions.includes(botJid)) return true;
 
   return false;
 }
 
 /**
- * Strips leading bot invocation tags from message text for clean AI prompting.
+ * Strips leading bot invocation tags and mentions from message text for clean AI prompting.
  */
-function stripTriggerPrefix(text) {
+function stripTriggerPrefix(text, botPhone = null) {
   const botName = (process.env.BOT_NAME || 'D').toLowerCase();
-  return text
+  let cleaned = text;
+
+  if (botPhone) {
+    cleaned = cleaned.replace(new RegExp(`@${botPhone}\\b`, 'g'), '');
+  }
+
+  cleaned = cleaned
+    .replace(new RegExp(`(?:^|\\s)@${botName}\\b`, 'gi'), '')
     .replace(new RegExp(`^(?:@bot|/bot|@${botName}|/${botName}|(?:hey|yo|sup|hello)\\s+${botName}|${botName})[,:]?\\s*`, 'i'), '')
     .trim();
+
+  return cleaned || text;
 }
 
 // ─── Multimodal Media Downloader (Image, Audio, Document) ─────────────────────
@@ -965,9 +1020,10 @@ export async function handleMessage(sock, msg) {
 
   // ── 5. Determine if bot should respond via AI ────────────────────────────
 
-  const botJid = sock.user?.id ? sock.user.id.replace(':0', '') + '@s.whatsapp.net' : null;
+  const botNormalizedJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
+  const botPhone = botNormalizedJid ? botNormalizedJid.split('@')[0] : null;
   // In private 1-on-1 DMs, always trigger a response
-  const directTrigger = isDM || isDirectTrigger(msg, botJid);
+  const directTrigger = isDM || isDirectTrigger(msg, sock);
   // In groups, untagged stickers do not trigger unsolicited chime-ins (to avoid spamming meme reactions)
   const orgChimeIn = !directTrigger && canChimeIn() && (shouldChimeIn(text) || (hasMedia && mediaObj.type !== 'sticker'));
 
@@ -982,7 +1038,7 @@ export async function handleMessage(sock, msg) {
 
   // ── 7. Build AI prompt ───────────────────────────────────────────────────
 
-  let userContent = stripTriggerPrefix(text);
+  let userContent = stripTriggerPrefix(text, botPhone);
   if (!userContent && mediaData) {
     if (mediaData.type === 'audio') userContent = '(sent a voice note)';
     else if (mediaData.type === 'document') userContent = '(shared a document)';
