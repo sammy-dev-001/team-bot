@@ -36,8 +36,12 @@ import {
   searchCodeSnippets,
   getRecentAuditLogs,
   saveConversationTurn,
+  saveResource,
+  listResources,
+  setChatChimeMode,
+  getChatChimeMode,
 } from './db.js';
-import { askAI, generateStandupBrief } from './ai.js';
+import { askAI, generateStandupBrief, transcribeAudioWithGroq, generateRecapDigest } from './ai.js';
 import { sendSafeMessage, sendPollMessage } from './whatsapp.js';
 
 // ─── Organic chime-in cooldown state ─────────────────────────────────────────
@@ -49,12 +53,42 @@ const cooldown = {
   CHIME_IN_EVERY_N_MESSAGES: 3,         // or every 3 messages
 };
 
+// ─── Per-sender rate limiter (prevents one user burning group AI quota) ────────
+// Key: senderJid, Value: { count, windowStart }
+const senderRateLimit = new Map();
+const SENDER_WINDOW_MS = 60 * 1000;  // 1-minute rolling window
+const SENDER_MAX_REQUESTS = 5;       // max 5 AI triggers per sender per minute in groups
+
+function checkSenderRateLimit(senderJid) {
+  const now = Date.now();
+  const entry = senderRateLimit.get(senderJid);
+  if (!entry || now - entry.windowStart > SENDER_WINDOW_MS) {
+    senderRateLimit.set(senderJid, { count: 1, windowStart: now });
+    return true; // allow
+  }
+  if (entry.count >= SENDER_MAX_REQUESTS) {
+    return false; // block — too many requests this minute
+  }
+  entry.count++;
+  return true; // allow
+}
+
 /**
  * Returns true if the organic cooldown allows another unsolicited reply.
+ * Takes the group's chime_mode ('sprint', 'normal', 'quiet') into account.
  */
-function canChimeIn() {
+function canChimeIn(mode = 'normal') {
+  if (mode === 'quiet') return false; // Quiet mode: zero unsolicited chime-ins
+
   const now = Date.now();
   const timeSinceLast = now - cooldown.lastChimeInAt;
+
+  if (mode === 'sprint') {
+    // Sprint mode: rapid responses for hackathons (1 message or 20s cooldown)
+    return cooldown.messagesSinceLastChimeIn >= 1 || timeSinceLast >= 20 * 1000;
+  }
+
+  // Normal mode: 3 messages or 2 minutes
   return (
     cooldown.messagesSinceLastChimeIn >= cooldown.CHIME_IN_EVERY_N_MESSAGES ||
     timeSinceLast >= cooldown.CHIME_IN_COOLDOWN_MS
@@ -72,9 +106,17 @@ function resetChimeIn() {
  * Lightweight heuristic: should the bot organically chime in on this message?
  * Looks for questions, technical discussion, bugs, planning, or natural cues.
  */
-function shouldChimeIn(text) {
-  if (!text) return false;
+function shouldChimeIn(text, mode = 'normal') {
+  if (!text || mode === 'quiet') return false;
   const lower = text.toLowerCase();
+
+  // In sprint mode, any question mark or active coding question immediately triggers
+  if (mode === 'sprint') {
+    if (text.includes('?')) return true;
+    if (/\b(how|what|why|where|when|can we|should we|anyone|who|help|review|look|check|error|bug|test|deploy|api)\b/i.test(lower)) {
+      return true;
+    }
+  }
 
   const technicalSignals = [
     /\b(bug|error|exception|crash|fix|broken|issue|problem|help|stuck|failing|blocker|blocked)\b/,
@@ -85,7 +127,6 @@ function shouldChimeIn(text) {
     /\b(hackathon|deadline|submission|milestone|launch|release|project)\b/,
     /\b(meeting|standup|planning|sprint|scrum|kanban)\b/,
     /\?/, // Any question mark
-    /\b(d)\b/i, // Mentioning D naturally
   ];
 
   const casualSignals = [
@@ -317,11 +358,70 @@ async function downloadMediaAsBase64(sock, mediaObj) {
     }
 
     const base64 = buffer.toString('base64');
-    return { mimeType, base64, type: mediaObj.type };
+    return { mimeType, base64, buffer, type: mediaObj.type };
   } catch (err) {
     console.error(`[Handler] ${mediaObj.type} download failed:`, err.message);
     return null;
   }
+}
+
+// ─── Automated Resource & Link Vault Extractor ───────────────────────────────
+
+/**
+ * Automatically extracts URLs and saves project resources into the vault.
+ */
+function extractAndSaveResources(remoteJid, text, senderName, senderJid) {
+  if (!text) return [];
+  const urlRegex = /(https?:\/\/[^\s<>"'{}|\\^`]+)/gi;
+  const matches = text.match(urlRegex);
+  if (!matches || !matches.length) return [];
+
+  const saved = [];
+  for (const rawUrl of matches) {
+    const url = rawUrl.replace(/[.,;!?]+$/, ''); // Strip trailing punctuation
+    let category = 'general';
+    const lower = url.toLowerCase();
+
+    if (lower.includes('figma.com')) category = 'design';
+    else if (lower.includes('github.com') || lower.includes('gitlab.com')) category = 'repo';
+    else if (
+      lower.includes('vercel.app') ||
+      lower.includes('netlify.app') ||
+      lower.includes('railway.app') ||
+      lower.includes('onrender.com') ||
+      lower.includes('render.com')
+    )
+      category = 'deployment';
+    else if (lower.includes('docs.google.com') || lower.includes('notion.so') || lower.includes('coda.io'))
+      category = 'doc';
+    else if (lower.includes('loom.com') || lower.includes('youtube.com') || lower.includes('youtu.be'))
+      category = 'video';
+    else if (lower.includes('linear.app') || lower.includes('trello.com') || lower.includes('jira'))
+      category = 'board';
+
+    // Title: use surrounding text if present, or derive from domain/path
+    let title = text.replace(rawUrl, '').replace(/https?:\/\/[^\s]+/g, '').trim();
+    if (!title || title.length < 3) {
+      try {
+        const parsed = new URL(url);
+        title = parsed.hostname + (parsed.pathname.length > 1 ? parsed.pathname.slice(0, 30) : '');
+      } catch (_) {
+        title = `${category.toUpperCase()} Link`;
+      }
+    }
+    title = title.replace(/^[:\-\s]+|[:\-\s]+$/g, '').slice(0, 100);
+
+    const record = saveResource({
+      group_jid: remoteJid,
+      url,
+      title,
+      category,
+      added_by: senderName,
+      sender_jid: senderJid,
+    });
+    if (record) saved.push(record);
+  }
+  return saved;
 }
 
 // ─── Automated Team Member Intro Parser ──────────────────────────────────────
@@ -426,6 +526,11 @@ export async function handleMessage(sock, msg) {
     content: text || (hasMedia ? `[${mediaObj.type}]` : '[media]'),
     has_media: hasMedia,
   });
+
+  // ── 2b. Auto-archive project links into Vault ─────────────────────────────
+  if (text) {
+    extractAndSaveResources(remoteJid, text, senderName, senderJid);
+  }
 
   // ── 3. Increment organic cooldown counter ────────────────────────────────
 
@@ -1018,29 +1123,164 @@ export async function handleMessage(sock, msg) {
     return;
   }
 
+  // /mode [sprint|normal|quiet] — manage chime-in sensitivity for group
+  if (isCommandWithArg('mode')) {
+    const rawArg = text.replace(/^(?:\/mode|@bot mode|\/bot mode|@[a-z0-9_]+ mode|mode)\s*/i, '').trim().toLowerCase();
+    if (!isGroup) {
+      await sendSafeMessage(sock, remoteJid, `💡 *Chat Mode Info:*\nIn 1-on-1 private DMs, I am always active (100% response). \`/mode\` is designed for groups!`, msg);
+      return;
+    }
+
+    if (!rawArg) {
+      const current = getChatChimeMode(remoteJid);
+      const desc = current === 'sprint'
+        ? '🚀 *Sprint Mode* (Highly active: answers questions, debates, and code discussions)'
+        : current === 'quiet'
+        ? '🤫 *Quiet Mode* (Only speaks when directly tagged @D or when slash commands are run)'
+        : '⚖️ *Normal Mode* (Balanced: chimes in selectively on bugs, blockers, and questions)';
+      await sendSafeMessage(
+        sock, remoteJid,
+        `🎚️ *Current Group Mode:* ${desc}\n\n` +
+        `*Available Modes:*\n` +
+        `• \`/mode sprint\` — Lock in for hackathon/deadline sprints 🚀\n` +
+        `• \`/mode normal\` — Balanced teammate chime-in (default) ⚖️\n` +
+        `• \`/mode quiet\` — Tag-only mode (@D) 🤫`,
+        msg
+      );
+      return;
+    }
+
+    if (['sprint', 'normal', 'quiet'].includes(rawArg)) {
+      const updated = setChatChimeMode(remoteJid, rawArg);
+      const icon = updated === 'sprint' ? '🚀' : updated === 'quiet' ? '🤫' : '⚖️';
+      await sendSafeMessage(
+        sock, remoteJid,
+        `${icon} *Chat Mode Updated to ${updated.toUpperCase()}!*\n\n` +
+        (updated === 'sprint'
+          ? '_I am now locked in with the squad! I will actively participate in technical discussions and answer questions without needing to be tagged every time._'
+          : updated === 'quiet'
+          ? '_Silence activated. I will only respond when directly tagged @D or when commands are run._'
+          : '_Back to balanced mode. I will listen passively and chime in on key technical cues or blockers._'),
+        msg
+      );
+    } else {
+      await sendSafeMessage(sock, remoteJid, `❌ Unknown mode: "${rawArg}". Use \`/mode sprint\`, \`/mode normal\`, or \`/mode quiet\`.`, msg);
+    }
+    return;
+  }
+
+  // /links or /vault or /resources — browse or search saved project links
+  if (isCommandWithArg('links') || isCommandWithArg('vault') || isCommandWithArg('resources')) {
+    const rawArg = text.replace(/^(?:\/(?:links|vault|resources)|@bot (?:links|vault|resources)|\/bot (?:links|vault|resources)|@[a-z0-9_]+ (?:links|vault|resources)|(?:links|vault|resources))\s*/i, '').trim();
+
+    let categoryFilter = '';
+    let searchFilter = rawArg;
+
+    const knownCats = ['design', 'figma', 'repo', 'github', 'code', 'deployment', 'deploy', 'live', 'doc', 'docs', 'video', 'board'];
+    if (knownCats.includes(rawArg.toLowerCase())) {
+      const c = rawArg.toLowerCase();
+      if (c === 'figma' || c === 'design') categoryFilter = 'design';
+      else if (c === 'github' || c === 'repo' || c === 'code') categoryFilter = 'repo';
+      else if (c === 'deploy' || c === 'live' || c === 'deployment') categoryFilter = 'deployment';
+      else if (c === 'doc' || c === 'docs') categoryFilter = 'doc';
+      else if (c === 'video') categoryFilter = 'video';
+      else if (c === 'board') categoryFilter = 'board';
+      searchFilter = '';
+    }
+
+    const items = listResources(remoteJid, { category: categoryFilter, search: searchFilter, limit: 15 });
+
+    if (!items.length) {
+      await sendSafeMessage(
+        sock, remoteJid,
+        `🔗 *Project Resource Vault*\n\n` +
+        (rawArg ? `No resources found matching *"${rawArg}"*.\n\n` : `Vault is empty! Drop any Figma, GitHub, PRD, or live deployment URL in chat and I'll automatically save it.\n\n`) +
+        `_Tip: Use \`/links figma\`, \`/links repo\`, or \`/links deploy\` to filter._`,
+        msg
+      );
+    } else {
+      const iconMap = {
+        design: '🎨 [Design / Figma]',
+        repo: '🐙 [Code Repository]',
+        deployment: '🌐 [Live Deployment]',
+        doc: '📄 [Document / PRD]',
+        video: '🎥 [Demo Video]',
+        board: '📋 [Project Board]',
+        general: '🔗 [Resource]',
+      };
+
+      const lines = items.map((r, i) => {
+        const cat = iconMap[r.category] || iconMap.general;
+        const title = r.title ? `*${r.title}*\n` : '';
+        const by = r.added_by ? ` (added by _${r.added_by}_)` : '';
+        return `${i + 1}. ${cat} ${title}↳ ${r.url}${by}`;
+      }).join('\n\n');
+
+      await sendSafeMessage(
+        sock, remoteJid,
+        `🗂️ *Project Resource Vault (${items.length})*\n\n${lines}\n\n_All links dropped in chat are automatically archived here!_`,
+        msg
+      );
+    }
+    return;
+  }
+
+  // /recap or /digest — catch-up executive summary
+  if (isCommandWithArg('recap') || isCommandWithArg('digest')) {
+    const rawArg = text.replace(/^(?:\/(?:recap|digest)|@bot (?:recap|digest)|\/bot (?:recap|digest)|@[a-z0-9_]+ (?:recap|digest)|(?:recap|digest))\s*/i, '').trim();
+
+    let hours = 24;
+    const matchHours = rawArg.match(/(\d+)\s*h?/i);
+    if (matchHours) {
+      hours = Math.min(Math.max(parseInt(matchHours[1], 10), 1), 72);
+    }
+
+    await sendSafeMessage(sock, remoteJid, `⏳ *Generating ${hours}h catch-up digest for the squad...*`, msg);
+
+    const messages = getMessagesSince(remoteJid, hours);
+    const recap = await generateRecapDigest(remoteJid, messages, hours);
+
+    await sendSafeMessage(sock, remoteJid, recap, msg);
+    return;
+  }
+
   // ── 5. Determine if bot should respond via AI ────────────────────────────
 
   const botNormalizedJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
   const botPhone = botNormalizedJid ? botNormalizedJid.split('@')[0] : null;
   const botJid = botNormalizedJid;
+  const chimeMode = isGroup ? getChatChimeMode(remoteJid) : 'normal';
   // In private 1-on-1 DMs, always trigger a response
   const directTrigger = isDM || isDirectTrigger(msg, sock);
   // In groups, untagged stickers do not trigger unsolicited chime-ins (to avoid spamming meme reactions)
-  const orgChimeIn = !directTrigger && canChimeIn() && (shouldChimeIn(text) || (hasMedia && mediaObj.type !== 'sticker'));
+  const orgChimeIn = !directTrigger && canChimeIn(chimeMode) && (shouldChimeIn(text, chimeMode) || (hasMedia && mediaObj.type !== 'sticker'));
 
   if (!directTrigger && !orgChimeIn) return;
+
+  // ── 5b. Per-sender rate limit in groups ────────────────────────────────────
+  // Prevent any single user from flooding group AI calls and burning API quota.
+  if (isGroup && !checkSenderRateLimit(senderJid)) {
+    console.warn(`[Handler] 🛑 Per-sender rate limit hit for ${senderName} (${senderJid}) in group ${remoteJid}. Skipping AI call.`);
+    return;
+  }
 
   // ── 6. Handle media multimodal download (image, audio, document) ─────────
 
   let mediaData = null;
+  let voiceTranscription = null;
   if (hasMedia) {
     mediaData = await downloadMediaAsBase64(sock, mediaObj);
+    if (mediaData?.type === 'audio' && mediaData?.buffer) {
+      voiceTranscription = await transcribeAudioWithGroq(mediaData.buffer, mediaData.mimeType);
+    }
   }
 
   // ── 7. Build AI prompt ───────────────────────────────────────────────────
 
   let userContent = stripTriggerPrefix(text, botPhone);
-  if (!userContent && mediaData) {
+  if (voiceTranscription) {
+    userContent = `(voice note: "${voiceTranscription}")` + (userContent ? ` — Note: ${userContent}` : '');
+  } else if (!userContent && mediaData) {
     if (mediaData.type === 'audio') userContent = '(sent a voice note)';
     else if (mediaData.type === 'document') userContent = '(shared a document)';
     else if (mediaData.type === 'sticker') userContent = '(sent a sticker)';
@@ -1100,16 +1340,16 @@ Decision Rules:
         await sendSafeMessage(
           sock,
           remoteJid,
-          '⚠️ *Gemini Daily Quota Limit Hit!* ⏳\n\n' +
-          'The daily free quota on our Gemini API key has been exhausted for today.\n\n' +
-          '💡 *Good news:* All fast commands still work 100% with zero quota:\n' +
+          '⚠️ *AI Rate Limit Hit — Taking a Breath* ⏳\n\n' +
+          'All available AI models hit their free-tier limits for now. Should recover in a few minutes.\n\n' +
+          '💡 *Good news:* All fast commands still work 100% right now:\n' +
           '• */tasks* — View open tasks\n' +
           '• */countdown* — Deadline clocks\n' +
           '• */done #ID* — Complete a task\n' +
           '• */remind in 30 mins to [action]* — Set reminders\n' +
           '• */snippet [query]* — Code snippets\n' +
           '• */poll "Question" "Opt 1" "Opt 2"* — Launch polls\n\n' +
-          '_To restore full AI conversation right now, plug in a free Groq key (GROQ_API_KEY from console.groq.com for 14,400 free requests/day) or update GEMINI_API_KEY!_ 🚀',
+          '_Full AI chat will auto-resume. If it keeps happening, update your GROQ_API_KEY at console.groq.com (free tier, 14,400 requests/day)._ 🚀',
           msg
         );
       } else {
@@ -1119,7 +1359,7 @@ Decision Rules:
     return;
   }
 
-  const aiText = typeof aiResult === 'string' ? aiResult : (aiResult?.text || '');
+  let aiText = typeof aiResult === 'string' ? aiResult : (aiResult?.text || '');
   const pendingDms = aiResult?.pendingDms || [];
   const polls = aiResult?.polls || [];
 
@@ -1127,6 +1367,11 @@ Decision Rules:
 
   if (!directTrigger && aiText.trim() === 'SKIP') {
     return; // Bot decided not to chime in
+  }
+
+  // Prepend transcription header if user sent a voice note so they see it was recognized
+  if (voiceTranscription && directTrigger && aiText.trim()) {
+    aiText = `🎙️ _"${voiceTranscription}"_\n\n` + aiText;
   }
 
   // ── 10. Send response ────────────────────────────────────────────────────

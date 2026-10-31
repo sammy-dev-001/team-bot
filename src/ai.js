@@ -33,6 +33,8 @@ import {
   logAudit,
   getRecentConversationHistory,
   getNow,
+  saveResource,
+  listResources,
 } from './db.js';
 
 // ─── Client ──────────────────────────────────────────────────────────────────
@@ -306,6 +308,31 @@ const TOOLS = [
           required: ['question', 'options'],
         },
       },
+      {
+        name: 'save_project_resource',
+        description: 'Save or update a project resource or URL in the team vault (e.g. Figma design link, GitHub repo, live Vercel/production deployment, Google Docs PRD, Loom video). Call this when someone shares an important link or project resource.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            url:      { type: 'STRING', description: 'The full URL (e.g. "https://figma.com/...")' },
+            title:    { type: 'STRING', description: 'Short descriptive title of what this link is' },
+            category: { type: 'STRING', enum: ['design', 'repo', 'deployment', 'doc', 'video', 'board', 'general'], description: 'Category of resource' },
+          },
+          required: ['url'],
+        },
+      },
+      {
+        name: 'get_project_resources',
+        description: 'Search or retrieve saved project resources, Figma links, GitHub repos, live deployment URLs, or documentation from the team vault.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            keyword:  { type: 'STRING', description: 'Search term (e.g. "figma", "auth", "staging", "repo"). Leave empty to list recent resources.' },
+            category: { type: 'STRING', enum: ['design', 'repo', 'deployment', 'doc', 'video', 'board', 'general'], description: 'Optional category filter' },
+          },
+          required: [],
+        },
+      },
     ],
   },
 ];
@@ -462,6 +489,25 @@ function executeTool(name, args, pendingDms = null, meta = {}) {
         });
       }
       return { success: true, question: args.question, options: args.options };
+    }
+    case 'save_project_resource': {
+      const res = saveResource({
+        group_jid: meta.chatJid,
+        url: args.url,
+        title: args.title || '',
+        category: args.category || 'general',
+        added_by: meta.senderName || '',
+        sender_jid: meta.senderJid || '',
+      });
+      return { success: true, resource: res };
+    }
+    case 'get_project_resources': {
+      const items = listResources(meta.chatJid, {
+        search: args.keyword || '',
+        category: args.category || '',
+        limit: 15,
+      });
+      return { success: true, resources: items, count: items.length };
     }
     default:
       return { success: false, error: `Unknown tool: ${name}` };
@@ -1206,21 +1252,12 @@ Write a direct, supportive, and solution-focused WhatsApp message to the squad:
 
 Keep it under 250 words. Lagos tech engineer voice — sharp, caring, constructive. Use WhatsApp bold/italics.`;
 
-  const response = await callGeminiWithRetryAndFallback({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    config: {
-      systemInstruction: systemPrompt,
-      temperature: 0.7,
-      maxOutputTokens: 800,
-    },
+  return await callAICompletion({
+    systemPrompt,
+    prompt,
+    temperature: 0.7,
+    maxTokens: 800,
   });
-
-  return (
-    response.candidates?.[0]?.content?.parts
-      ?.filter((p) => p.text)
-      .map((p) => p.text)
-      .join('') || null
-  );
 }
 
 /**
@@ -1289,21 +1326,12 @@ Structure the weekly report:
 
 Tone: Senior tech lead who celebrates wins, keeps standards high, and boosts morale. Under 300 words.`;
 
-  const response = await callGeminiWithRetryAndFallback({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    config: {
-      systemInstruction: systemPrompt,
-      temperature: 0.7,
-      maxOutputTokens: 1000,
-    },
+  return await callAICompletion({
+    systemPrompt,
+    prompt,
+    temperature: 0.7,
+    maxTokens: 1000,
   });
-
-  return (
-    response.candidates?.[0]?.content?.parts
-      ?.filter((p) => p.text)
-      .map((p) => p.text)
-      .join('') || null
-  );
 }
 
 // ─── Standalone standup generator ────────────────────────────────────────────
@@ -1381,19 +1409,108 @@ Structure the standup cleanly using WhatsApp formatting:
 
 IMPORTANT: Always format member tags as @phonenumber (e.g. @2348012345678) so WhatsApp mentions trigger properly.`;
 
-  const response = await callGeminiWithRetryAndFallback({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    config: {
-      systemInstruction: systemPrompt,
-      temperature: 0.7,
-      maxOutputTokens: 1500,
-    },
+  return await callAICompletion({
+    systemPrompt,
+    prompt,
+    temperature: 0.7,
+    maxTokens: 1500,
+  }) || '🌅 Morning team! Standup brief could not load today, but let\'s make moves! 💪';
+}
+
+// ─── Voice Note Transcription (Whisper) ──────────────────────────────────────
+
+/**
+ * Transcribes audio (voice notes, ogg, wav, mp3) using Groq's Whisper API.
+ * Returns the transcribed text string or null on failure.
+ */
+export async function transcribeAudioWithGroq(audioBuffer, mimeType = 'audio/ogg') {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey || !audioBuffer || !audioBuffer.length) return null;
+
+  try {
+    const ext = mimeType.includes('ogg')
+      ? 'ogg'
+      : mimeType.includes('mp4') || mimeType.includes('m4a')
+      ? 'm4a'
+      : mimeType.includes('wav')
+      ? 'wav'
+      : 'mp3';
+
+    const blob = new Blob([audioBuffer], { type: mimeType });
+    const formData = new FormData();
+    formData.append('file', blob, `voice_note.${ext}`);
+    formData.append('model', 'whisper-large-v3-turbo');
+    formData.append('response_format', 'json');
+    formData.append('temperature', '0.0');
+    formData.append('prompt', 'English and Nigerian tech conversation, coding terms, Lagos slangs');
+
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: formData,
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const text = data?.text?.trim();
+      if (text) {
+        console.log(`[Whisper] 🎙️ Transcribed audio (${audioBuffer.length} bytes): "${text}"`);
+        return text;
+      }
+    } else {
+      const errText = await res.text();
+      console.warn('[Whisper] Groq Whisper failed:', res.status, errText);
+    }
+  } catch (err) {
+    console.warn('[Whisper] Audio transcription error:', err.message);
+  }
+  return null;
+}
+
+// ─── Catch-Up Digest / Recap Generator ───────────────────────────────────────
+
+/**
+ * Generates an executive catch-up recap of recent group chatter.
+ */
+export async function generateRecapDigest(groupJid, messages, hoursAgo = 24) {
+  const systemPrompt = buildSystemPrompt(groupJid);
+
+  if (!messages || messages.length < 2) {
+    return `Omo, the squad has been pretty quiet over the last ${hoursAgo} hours! Zero major debates or task updates dropped. We move! 🚀`;
+  }
+
+  const chatTranscript = messages
+    .map((m) => `[${m.timestamp}] ${m.sender_name}: ${m.content}`)
+    .join('\n');
+
+  const prompt = `A teammate was away and just requested a catch-up recap of the group's conversation from the last ${hoursAgo} hours.
+
+Chat Transcript:
+${chatTranscript}
+
+Write a high-signal, punchy WhatsApp executive summary:
+1. *🎯 Key Decisions & Architecture Highlights* — What was decided or agreed upon?
+2. *🚀 Deliverables & Completed Tasks* — What got shipped or updated?
+3. *⚠️ Blockers & Urgent Items* — Who is stuck or what needs urgent attention?
+4. *🔗 Links & Artifacts Shared* — Any PRDs, Figma links, repos, or live staging URLs shared?
+
+Style guidelines:
+- Sharp Lagos tech peer voice: friendly, concise, zero corporate fluff.
+- Use WhatsApp bold/italics.
+- Under 250 words total.
+- If a section has nothing, skip it or write "None recorded".`;
+
+  const recapText = await callAICompletion({
+    systemPrompt,
+    prompt,
+    temperature: 0.7,
+    maxTokens: 700,
   });
 
   return (
-    response.candidates?.[0]?.content?.parts
-      ?.filter((p) => p.text)
-      .map((p) => p.text)
-      .join('') || '🌅 Morning team! Standup brief could not load today, but let\'s make moves! 💪'
+    recapText ||
+    `⚡ *Quick Catch-Up (${hoursAgo}h)*\n\nRecent activity has been logged! Check /tasks and /countdown for live deliverables.`
   );
 }

@@ -175,7 +175,19 @@ db.exec(`
     name        TEXT DEFAULT '',
     chat_type   TEXT DEFAULT 'group' CHECK(chat_type IN ('group', 'dm')),
     status      TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused')),
+    chime_mode  TEXT DEFAULT 'normal' CHECK(chime_mode IN ('sprint', 'normal', 'quiet')),
     added_by    TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS resources (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_jid   TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    title       TEXT DEFAULT '',
+    category    TEXT DEFAULT 'general',
+    added_by    TEXT DEFAULT '',
+    sender_jid  TEXT DEFAULT '',
     created_at  TEXT DEFAULT (datetime('now'))
   );
 
@@ -189,18 +201,21 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_snippets_title ON code_snippets(title);
   CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
   CREATE INDEX IF NOT EXISTS idx_conv_chat ON conversation_history(chat_jid, created_at);
+  CREATE INDEX IF NOT EXISTS idx_resources_group ON resources(group_jid, created_at);
+  CREATE INDEX IF NOT EXISTS idx_resources_url ON resources(url);
 `);
 
-// Safe migrations for tasks table
-const taskMigrations = [
+// Safe migrations for tasks and authorized_chats table
+const tableMigrations = [
   `ALTER TABLE tasks ADD COLUMN notified_24h INTEGER DEFAULT 0;`,
   `ALTER TABLE tasks ADD COLUMN notified_due INTEGER DEFAULT 0;`,
   `ALTER TABLE tasks ADD COLUMN completed_at TEXT DEFAULT '';`,
   `ALTER TABLE tasks ADD COLUMN updated_at TEXT DEFAULT '';`,
   `ALTER TABLE tasks ADD COLUMN block_reason TEXT DEFAULT '';`,
   `ALTER TABLE tasks ADD COLUMN notified_overdue_at TEXT DEFAULT '';`,
+  `ALTER TABLE authorized_chats ADD COLUMN chime_mode TEXT DEFAULT 'normal';`,
 ];
-for (const sql of taskMigrations) {
+for (const sql of tableMigrations) {
   try { db.exec(sql); } catch (e) { /* Column already exists */ }
 }
 
@@ -1035,6 +1050,103 @@ export function getAllAuthorizedGroupJids() {
  */
 export function getAllAuthorizedChats() {
   return db.prepare("SELECT * FROM authorized_chats WHERE status = 'active' ORDER BY created_at DESC").all();
+}
+
+// ─── Group Chime Mode (Sprint, Normal, Quiet) ────────────────────────────────
+
+/**
+ * Set the chime mode for a chat ('sprint', 'normal', 'quiet').
+ */
+export function setChatChimeMode(jid, mode = 'normal') {
+  const validModes = ['sprint', 'normal', 'quiet'];
+  const cleanMode = validModes.includes(mode?.toLowerCase()) ? mode.toLowerCase() : 'normal';
+  db.prepare(`
+    UPDATE authorized_chats
+    SET chime_mode = ?
+    WHERE jid = ?
+  `).run(cleanMode, jid);
+  return cleanMode;
+}
+
+/**
+ * Get the chime mode for a chat. Defaults to 'normal'.
+ */
+export function getChatChimeMode(jid) {
+  if (!jid) return 'normal';
+  const row = db.prepare(`SELECT chime_mode FROM authorized_chats WHERE jid = ?`).get(jid);
+  return row?.chime_mode || 'normal';
+}
+
+// ─── Resource & Link Vault ───────────────────────────────────────────────────
+
+/**
+ * Save or update a project resource link (Figma, GitHub, Live Deploy, Docs, etc.).
+ */
+export function saveResource({ group_jid, url, title = '', category = 'general', added_by = '', sender_jid = '' }) {
+  if (!url) return null;
+  const cleanUrl = url.trim();
+  const existing = db.prepare('SELECT id FROM resources WHERE group_jid = ? AND url = ?').get(group_jid, cleanUrl);
+
+  if (existing) {
+    db.prepare(`
+      UPDATE resources
+      SET title = COALESCE(NULLIF(?, ''), title),
+          category = COALESCE(NULLIF(?, ''), category),
+          added_by = COALESCE(NULLIF(?, ''), added_by),
+          created_at = datetime('now')
+      WHERE id = ?
+    `).run(title, category, added_by, existing.id);
+    return db.prepare('SELECT * FROM resources WHERE id = ?').get(existing.id);
+  }
+
+  const info = db.prepare(`
+    INSERT INTO resources (group_jid, url, title, category, added_by, sender_jid, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+  `).run(group_jid, cleanUrl, title, category, added_by, sender_jid);
+
+  logAudit({
+    action: 'SAVE',
+    entity_type: 'resource',
+    entity_id: info.lastInsertRowid,
+    details: `Added ${category} resource: ${cleanUrl} (${title})`,
+    performed_by: added_by || sender_jid || 'system',
+  });
+
+  return db.prepare('SELECT * FROM resources WHERE id = ?').get(info.lastInsertRowid);
+}
+
+/**
+ * List resources with optional category filter or keyword search.
+ */
+export function listResources(group_jid, { category = '', search = '', limit = 30 } = {}) {
+  let query = 'SELECT * FROM resources WHERE group_jid = ?';
+  const params = [group_jid];
+
+  if (category) {
+    query += ' AND category = ?';
+    params.push(category);
+  }
+
+  if (search) {
+    query += ' AND (title LIKE ? OR url LIKE ? OR added_by LIKE ?)';
+    const term = `%${search}%`;
+    params.push(term, term, term);
+  }
+
+  query += ' ORDER BY created_at DESC LIMIT ?';
+  params.push(limit);
+
+  return db.prepare(query).all(...params);
+}
+
+/**
+ * Delete a resource by ID.
+ */
+export function deleteResource(id) {
+  const row = db.prepare('SELECT * FROM resources WHERE id = ?').get(id);
+  if (!row) return false;
+  db.prepare('DELETE FROM resources WHERE id = ?').run(id);
+  return true;
 }
 
 export default db;

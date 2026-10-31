@@ -12,6 +12,7 @@ import 'dotenv/config';
 import { connectToWhatsApp, onMessage, getSocket } from './whatsapp.js';
 import { handleMessage } from './handler.js';
 import { startScheduler } from './scheduler.js';
+import { startWebhookServer } from './server.js';
 
 // ─── Startup banner ───────────────────────────────────────────────────────────
 
@@ -24,8 +25,8 @@ console.log('');
 
 // ─── Environment validation ───────────────────────────────────────────────────
 
-if (!process.env.GEMINI_API_KEY) {
-  console.error('❌  GEMINI_API_KEY is not set in .env — exiting.');
+if (!process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY && !process.env.OPENROUTER_API_KEY) {
+  console.error('❌  No AI key set (GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY) — exiting.');
   process.exit(1);
 }
 
@@ -49,6 +50,9 @@ onMessage(handleMessage);
     // Pass getSocket as a getter so the scheduler always references the latest
     // socket even after a reconnect.
     startScheduler(getSocket);
+
+    // ── Start webhook & health-check server ───────────────────────────────
+    startWebhookServer(getSocket);
 
     console.log('\n✅  Bot is live! Listening for messages… 🚀\n');
   } catch (err) {
