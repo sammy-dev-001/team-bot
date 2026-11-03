@@ -40,6 +40,10 @@ import {
   listResources,
   setChatChimeMode,
   getChatChimeMode,
+  pauseChat,
+  resumeChat,
+  isChatPaused,
+  forgetProject,
 } from './db.js';
 import { askAI, generateStandupBrief, transcribeAudioWithGroq, generateRecapDigest } from './ai.js';
 import { sendSafeMessage, sendPollMessage } from './whatsapp.js';
@@ -113,7 +117,7 @@ function shouldChimeIn(text, mode = 'normal') {
   // In sprint mode, any question mark or active coding question immediately triggers
   if (mode === 'sprint') {
     if (text.includes('?')) return true;
-    if (/\b(how|what|why|where|when|can we|should we|anyone|who|help|review|look|check|error|bug|test|deploy|api)\b/i.test(lower)) {
+    if (/\b(how|what|why|where|when|can we|should we|anyone|who|help|review|look|check|error|bug|test|deploy|api|omo|abeg|wetin)\b/i.test(lower)) {
       return true;
     }
   }
@@ -132,7 +136,11 @@ function shouldChimeIn(text, mode = 'normal') {
   const casualSignals = [
     /\b(stressed|tired|overwhelmed|panic|scared|nervous|excited|cooking)\b/,
     /\b(done|finished|completed|shipped|deployed|live)\b/,
-    /🚀|🔥|💡|😭|😅|🤯|🎉/,
+    /\b(omo|abeg|wahala|sharp|dulling|sabi|wetin|correct|japa|chop|carry go)\b/i,
+    /\b(hungry|food|eat|lunch|dinner|break|rest|sleep|wake|morning|night)\b/,
+    /\b(funny|joke|banter|gist|ginger|hype|dead|lol|lmao)\b/i,
+    /\b(feel|feeling|mood|vibe|energy|bad|sad|happy|excited|angry|annoyed)\b/,
+    /🚀|🔥|💡|😭|😅|🤯|🎉|💀|😂|🙄|😤|😪|🤦|💅/,
   ];
 
   const hasSignal = [...technicalSignals, ...casualSignals].some((r) => r.test(lower));
@@ -532,6 +540,27 @@ export async function handleMessage(sock, msg) {
     extractAndSaveResources(remoteJid, text, senderName, senderJid);
   }
 
+  // ── 2c. Pause gate — if bot is paused, only allow /resume ────────────────
+  if (isChatPaused(remoteJid)) {
+    // Allow /resume even when paused
+    const cmdRaw = text.toLowerCase().trim();
+    if (
+      cmdRaw === '/resume' ||
+      cmdRaw === `@bot resume` ||
+      cmdRaw === `@${(process.env.BOT_NAME || 'd').toLowerCase()} resume` ||
+      (isDM && cmdRaw === 'resume')
+    ) {
+      resumeChat(remoteJid);
+      await sendSafeMessage(
+        sock, remoteJid,
+        `✅ *${process.env.BOT_NAME || 'D'} is back online!* 🚀\n_Missed me? Let's go — what did I miss?_`,
+        msg
+      );
+    }
+    // Silently ignore everything else while paused
+    return;
+  }
+
   // ── 3. Increment organic cooldown counter ────────────────────────────────
 
   cooldown.messagesSinceLastChimeIn++;
@@ -694,6 +723,8 @@ export async function handleMessage(sock, msg) {
       `• */notes [keyword]* — Search or view saved project notes\n` +
       `• */snippet [keyword]* — Search saved code snippets & solutions\n` +
       `• */standup* — Generate an on-demand morning standup brief\n` +
+      `• */recap [hours]* — Catch-up digest of what you missed (e.g. */recap 4*)\n` +
+      `• */links [figma|repo|deploy|doc]* — View saved project resource vault\n` +
       `• */status* or */ping* — View bot uptime & health metrics\n` +
       `• */audit* — View recent team audit trail\n\n` +
       `*✅ Task Fast Commands:*\n` +
@@ -703,12 +734,20 @@ export async function handleMessage(sock, msg) {
       `• */assign #5 David* — Reassign task #5 to David\n` +
       `• */remind in 30 mins to [action]* — Set a personal reminder\n` +
       `• */poll "Question" "Opt 1" "Opt 2"* — Launch a native WhatsApp poll\n\n` +
+      `*🎛️ Group Behaviour Modes (use /mode to check):*\n` +
+      `• */mode sprint* — 🚀 *Sprint Mode*: Hyper-active! D joins every question, debate, and bug. Use during hackathons or deadline crunches.\n` +
+      `• */mode normal* — ⚖️ *Normal Mode*: Balanced (default). Chimes in selectively on real blockers & questions.\n` +
+      `• */mode quiet* — 🤫 *Quiet Mode*: Complete silence until you tag @${botName} directly or run a slash command. For deep focus sessions.\n\n` +
+      `*🔇 Bot Control:*\n` +
+      `• */pause* — Temporarily silence the bot completely (ignores all messages)\n` +
+      `• */resume* — Wake the bot back up\n` +
+      `• */forget project [name]* — Wipe all tasks, notes, resources & deadlines linked to a project name\n\n` +
       `*🧠 AI Assistant & Teammate:*\n` +
-      `• Tag *@${botName}* or reply to any bot message to plan tasks, debug, or ask questions.\n` +
-      `• Multi-turn conversational memory persists across turns.\n` +
+      `• Tag *@${botName}* or reply to any bot message to chat, debug, plan, or ask anything.\n` +
+      `• Understands Nigerian English, Pidgin, sarcasm, and stickers 🎭\n` +
       `• Send voice notes 🎙️ to ask questions or assign tasks on the go.\n` +
       `• Share flyers 📄, UI mockups 🖼️, or docs for automatic analysis.\n` +
-      `• The bot naturally chimes into technical discussions and *will call out delayed or inactive members.*`;
+      `• The bot will call out overdue tasks & inactive members — professionally but directly.`;
     await sendSafeMessage(sock, remoteJid, helpText, msg);
     return;
   }
@@ -1123,6 +1162,66 @@ export async function handleMessage(sock, msg) {
     return;
   }
 
+  // /pause — temporarily silence the bot
+  if (isCommand('pause') || isCommand('sleep') || isCommand('shh')) {
+    pauseChat(remoteJid);
+    const botName = process.env.BOT_NAME || 'D';
+    await sendSafeMessage(
+      sock, remoteJid,
+      `🔇 *${botName} is now paused.* I'll be silent until someone runs */resume*.\n_Oya rest, I dey standby. 💤_`,
+      msg
+    );
+    return;
+  }
+
+  // /resume — wake the bot back up (also handled in pause gate above, but kept here for when not paused)
+  if (isCommand('resume') || isCommand('wake') || isCommand('unpause')) {
+    resumeChat(remoteJid);
+    const botName = process.env.BOT_NAME || 'D';
+    await sendSafeMessage(
+      sock, remoteJid,
+      `✅ *${botName} is back online!* 🚀\n_Missed me? Let's go — what did I miss?_`,
+      msg
+    );
+    return;
+  }
+
+  // /forget project [name] — wipe all data tied to a project
+  if (isCommandWithArg('forget')) {
+    const rawArg = text.replace(/^(?:\/forget|@bot forget|\/bot forget|@[a-z0-9_]+ forget|forget)\s*/i, '').trim();
+    // Expect: /forget project <name>  OR  /forget <name>
+    const projectName = rawArg.replace(/^project\s+/i, '').trim();
+    if (!projectName) {
+      await sendSafeMessage(
+        sock, remoteJid,
+        `💡 *How to wipe a project from memory:*\n\`/forget project AuthService\`\n\`/forget project Hackathon App\`\n\n_This removes all tasks, notes, deadlines, and saved links associated with that project name._`,
+        msg
+      );
+      return;
+    }
+    const counts = forgetProject(projectName);
+    const total = counts.tasks + counts.deadlines + counts.notes + counts.resources;
+    if (total === 0) {
+      await sendSafeMessage(
+        sock, remoteJid,
+        `🔍 Nothing found matching *"${projectName}"* in memory. Double-check the project name and try again.`,
+        msg
+      );
+    } else {
+      await sendSafeMessage(
+        sock, remoteJid,
+        `🗑️ *Project "${projectName}" wiped from memory.*\n\n` +
+        `• Tasks removed: *${counts.tasks}*\n` +
+        `• Deadlines removed: *${counts.deadlines}*\n` +
+        `• Notes removed: *${counts.notes}*\n` +
+        `• Saved links removed: *${counts.resources}*\n\n` +
+        `_All done. That project no longer exists in my head. Fresh slate! 🧹_`,
+        msg
+      );
+    }
+    return;
+  }
+
   // /mode [sprint|normal|quiet] — manage chime-in sensitivity for group
   if (isCommandWithArg('mode')) {
     const rawArg = text.replace(/^(?:\/mode|@bot mode|\/bot mode|@[a-z0-9_]+ mode|mode)\s*/i, '').trim().toLowerCase();
@@ -1298,9 +1397,12 @@ export async function handleMessage(sock, msg) {
 ${senderName} said in group: "${userContent}"
 
 Decision Rules:
-- If this is a question, a bug or blocker, technical discussion, someone sharing progress/frustration, deadline talk, or where your advice adds value: CHIME IN naturally and helpfully as D.
-- Speak casually, warmly, like an experienced friendly teammate who is active in the room.
-- If it's purely 2-person private chit-chat, a trivial greeting, or already answered completely: respond with ONLY the single word: SKIP
+- READ THE MESSAGE CAREFULLY before deciding what kind of response it needs.
+- This does NOT have to be about tech or coding. If someone is venting, joking, sharing something personal, talking about food, life, sports, or anything human — respond to THAT genuinely. You are a whole person in this group, not just a code bot.
+- If it's a question (technical or not), a bug, a blocker, frustration, hype, banter, interesting gist, or something you can add genuine value or fun to: CHIME IN naturally as D.
+- Match the energy of the message — don't be formal when someone is being casual or funny.
+- Understand sarcasm and Nigerian expressions correctly. "Wow so the API crashes again 🙄" = frustration, NOT excitement.
+- If it's purely a 2-person private exchange, a solo one-liner with no hook for you, or something already fully resolved: respond with ONLY the single word: SKIP
 - Never say "I'm chiming in because...". Just speak directly as D.`;
   }
 
@@ -1310,7 +1412,7 @@ Decision Rules:
     } else if (mediaData.type === 'document') {
       enrichedMessage += `\n\n[DOCUMENT ATTACHED — Review the document carefully (e.g. PRD, specification, API docs, code). Provide insightful engineering feedback, answer questions, or extract any tasks / deadlines mentioned.]`;
     } else if (mediaData.type === 'sticker') {
-      enrichedMessage += `\n\n[STICKER ATTACHED — This is a WhatsApp sticker (meme, cartoon, reaction image, or graphic). Inspect the visual, any text/caption written on the sticker, characters, and facial expression. Understand the meme or emotional reaction, and respond or banter back with authentic humor and wit as D!]`;
+      enrichedMessage += `\n\n[STICKER ATTACHED — This is a WhatsApp sticker (meme, reaction gif, cartoon, or graphic). Understand what vibe or emotion the sticker is conveying — celebration, frustration, sarcasm, boredom, hype, "I told you so", dead-laugh, clout, confusion, etc. React to it naturally and authentically like a teammate in the chat would — banter, match the energy, hype it up, or gently tease. Do NOT give a dry neutral description. If the sticker was sent in response to something, factor in that context and respond as D in the moment.]`;
     } else {
       enrichedMessage += `\n\n[IMAGE ATTACHED — Review the image carefully. If it's a hackathon flyer or event with a deadline, call add_deadline. If it's a UI mockup or architecture diagram, provide constructive engineering feedback and suggest tasks for relevant teammates based on their skills.]`;
     }

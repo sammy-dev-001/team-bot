@@ -1052,6 +1052,52 @@ export function getAllAuthorizedChats() {
   return db.prepare("SELECT * FROM authorized_chats WHERE status = 'active' ORDER BY created_at DESC").all();
 }
 
+// ─── Bot Pause / Resume ───────────────────────────────────────────────────────
+
+/**
+ * Pause the bot in a specific chat (sets status = 'paused').
+ * While paused, the bot ignores all messages except /resume.
+ */
+export function pauseChat(jid) {
+  db.prepare(`UPDATE authorized_chats SET status = 'paused' WHERE jid = ?`).run(jid);
+}
+
+/**
+ * Resume the bot in a specific chat (sets status = 'active').
+ */
+export function resumeChat(jid) {
+  db.prepare(`UPDATE authorized_chats SET status = 'active' WHERE jid = ?`).run(jid);
+}
+
+/**
+ * Returns true if the chat is currently paused.
+ */
+export function isChatPaused(jid) {
+  if (!jid) return false;
+  const row = db.prepare(`SELECT status FROM authorized_chats WHERE jid = ?`).get(jid);
+  return row?.status === 'paused';
+}
+
+// ─── Project Forget (selective memory wipe) ───────────────────────────────────
+
+/**
+ * Delete all data associated with a project name from tasks, deadlines, notes, and resources.
+ * Returns counts of deleted records per table.
+ */
+export function forgetProject(projectName) {
+  const like = `%${projectName.trim()}%`;
+  const tasks    = db.prepare(`DELETE FROM tasks WHERE lower(project_name) LIKE lower(?)`).run(like);
+  const deadlines = db.prepare(`DELETE FROM deadlines WHERE lower(title) LIKE lower(?) OR lower(description) LIKE lower(?)`).run(like, like);
+  const notes    = db.prepare(`DELETE FROM project_notes WHERE lower(project_name) LIKE lower(?)`).run(like);
+  const resources = db.prepare(`DELETE FROM resources WHERE lower(title) LIKE lower(?) OR lower(url) LIKE lower(?)`).run(like, like);
+  return {
+    tasks: tasks.changes,
+    deadlines: deadlines.changes,
+    notes: notes.changes,
+    resources: resources.changes,
+  };
+}
+
 // ─── Group Chime Mode (Sprint, Normal, Quiet) ────────────────────────────────
 
 /**
