@@ -1017,8 +1017,8 @@ export function isChatAuthorized(jid) {
     return true;
   }
 
-  // 3. Database registered chats
-  const row = db.prepare("SELECT 1 FROM authorized_chats WHERE jid = ? AND status = 'active' LIMIT 1").get(jid);
+  // 3. Database registered chats (active or paused)
+  const row = db.prepare("SELECT 1 FROM authorized_chats WHERE jid = ? LIMIT 1").get(jid);
   if (row) return true;
 
   // 4. Any registered team member is authorized for 1-on-1 DM
@@ -1058,15 +1058,33 @@ export function getAllAuthorizedChats() {
  * Pause the bot in a specific chat (sets status = 'paused').
  * While paused, the bot ignores all messages except /resume.
  */
-export function pauseChat(jid) {
-  db.prepare(`UPDATE authorized_chats SET status = 'paused' WHERE jid = ?`).run(jid);
+export function pauseChat(jid, name = '', chatType = 'group') {
+  if (!jid) return;
+  const existing = db.prepare('SELECT jid FROM authorized_chats WHERE jid = ?').get(jid);
+  if (existing) {
+    db.prepare(`UPDATE authorized_chats SET status = 'paused' WHERE jid = ?`).run(jid);
+  } else {
+    db.prepare(`
+      INSERT INTO authorized_chats (jid, name, chat_type, status, chime_mode, created_at)
+      VALUES (?, ?, ?, 'paused', 'normal', datetime('now'))
+    `).run(jid, name || (jid.endsWith('@g.us') ? 'Group Chat' : 'DM'), jid.endsWith('@g.us') ? 'group' : 'dm');
+  }
 }
 
 /**
  * Resume the bot in a specific chat (sets status = 'active').
  */
 export function resumeChat(jid) {
-  db.prepare(`UPDATE authorized_chats SET status = 'active' WHERE jid = ?`).run(jid);
+  if (!jid) return;
+  const existing = db.prepare('SELECT jid FROM authorized_chats WHERE jid = ?').get(jid);
+  if (existing) {
+    db.prepare(`UPDATE authorized_chats SET status = 'active' WHERE jid = ?`).run(jid);
+  } else {
+    db.prepare(`
+      INSERT INTO authorized_chats (jid, name, chat_type, status, chime_mode, created_at)
+      VALUES (?, ?, ?, 'active', 'normal', datetime('now'))
+    `).run(jid, jid.endsWith('@g.us') ? 'Group Chat' : 'DM', jid.endsWith('@g.us') ? 'group' : 'dm');
+  }
 }
 
 /**

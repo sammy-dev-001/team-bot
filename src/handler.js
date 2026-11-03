@@ -542,18 +542,39 @@ export async function handleMessage(sock, msg) {
 
   // ── 2c. Pause gate — if bot is paused, only allow /resume ────────────────
   if (isChatPaused(remoteJid)) {
-    // Allow /resume even when paused
-    const cmdRaw = text.toLowerCase().trim();
-    if (
-      cmdRaw === '/resume' ||
-      cmdRaw === `@bot resume` ||
-      cmdRaw === `@${(process.env.BOT_NAME || 'd').toLowerCase()} resume` ||
-      (isDM && cmdRaw === 'resume')
-    ) {
+    const botNameLower = (process.env.BOT_NAME || 'd').toLowerCase();
+    const botNormalizedJid = sock?.user?.id ? jidNormalizedUser(sock.user.id) : null;
+    const botPhone = botNormalizedJid ? botNormalizedJid.split('@')[0] : null;
+    const stripped = stripTriggerPrefix(text, botPhone).toLowerCase().trim();
+    const rawLower = text.toLowerCase().trim();
+
+    const isResume =
+      rawLower === '/resume' ||
+      rawLower === '/wake' ||
+      rawLower === '/unpause' ||
+      rawLower === 'resume' ||
+      rawLower === 'wake' ||
+      rawLower === 'unpause' ||
+      rawLower === `@bot resume` ||
+      rawLower === `/bot resume` ||
+      rawLower === `@${botNameLower} resume` ||
+      rawLower === `/${botNameLower} resume` ||
+      rawLower === `${botNameLower} resume` ||
+      rawLower.startsWith('/resume') ||
+      rawLower.startsWith('resume') ||
+      stripped === 'resume' ||
+      stripped === '/resume' ||
+      stripped === 'wake' ||
+      stripped === '/wake' ||
+      stripped === 'unpause' ||
+      stripped === '/unpause';
+
+    if (isResume) {
       resumeChat(remoteJid);
+      const botDisplayName = process.env.BOT_NAME || 'D';
       await sendSafeMessage(
         sock, remoteJid,
-        `✅ *${process.env.BOT_NAME || 'D'} is back online!* 🚀\n_Missed me? Let's go — what did I miss?_`,
+        `✅ *${botDisplayName} is back online!* 🚀\n_Missed me? Let's go — what did I miss?_`,
         msg
       );
     }
@@ -1164,7 +1185,7 @@ export async function handleMessage(sock, msg) {
 
   // /pause — temporarily silence the bot
   if (isCommand('pause') || isCommand('sleep') || isCommand('shh')) {
-    pauseChat(remoteJid);
+    pauseChat(remoteJid, isGroup ? 'Group Chat' : senderName, isGroup ? 'group' : 'dm');
     const botName = process.env.BOT_NAME || 'D';
     await sendSafeMessage(
       sock, remoteJid,

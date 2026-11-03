@@ -276,14 +276,26 @@ export async function connectToWhatsApp() {
         rawText === '/activate' ||
         rawText === '/start' ||
         rawText === '/init' ||
+        rawText === '/resume' ||
+        rawText === '/wake' ||
+        rawText === '/unpause' ||
         rawText === 'activate' ||
         rawText === 'start' ||
         rawText === 'init' ||
+        rawText === 'resume' ||
+        rawText === 'wake' ||
+        rawText === 'unpause' ||
         rawText.startsWith('/activate') ||
         rawText.startsWith('/start') ||
         rawText.startsWith('/init') ||
+        rawText.startsWith('/resume') ||
+        rawText.startsWith('/wake') ||
+        rawText.startsWith('/unpause') ||
         rawText.startsWith('activate ') ||
         rawText.startsWith('start ') ||
+        rawText.startsWith('resume ') ||
+        rawText.startsWith('wake ') ||
+        rawText.startsWith('unpause ') ||
         rawText.startsWith('@bot') ||
         rawText.startsWith('/bot') ||
         rawText.startsWith(`@${botName}`) ||
