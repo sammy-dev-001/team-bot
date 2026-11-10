@@ -44,6 +44,7 @@ import {
   pauseChat,
   resumeChat,
   isChatPaused,
+  isChatAuthorized,
   forgetProject,
 } from './db.js';
 import { askAI, generateStandupBrief, transcribeAudioWithGroq, generateRecapDigest } from './ai.js';
@@ -746,6 +747,8 @@ export async function handleMessage(sock, msg) {
 
   // ── Activation / Onboarding Command ──────────────────────────────────────
   if (isCommand('activate') || isCommand('start') || isCommand('init')) {
+    const wasAlreadyAuthorized = isChatAuthorized(remoteJid);
+
     let chatName = senderName;
     if (isGroup) {
       try {
@@ -766,6 +769,44 @@ export async function handleMessage(sock, msg) {
     const botDisplayName = process.env.BOT_NAME || 'D';
 
     if (isGroup) {
+      if (wasAlreadyAuthorized) {
+        // Re-activation in an existing squad: broadcast system upgrades & what's new
+        const reactivationMsg =
+          `⚡ *${botDisplayName} is Re-Activated & Upgraded!* 🇳🇬🚀\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `What's good *${chatName}*! I'm back, refreshed, and locked in with new superpowers to keep this squad moving at maximum speed.\n\n` +
+          `🔥 *Here is what's new in my brain:*\n\n` +
+          `👁️ *Quoted Message Vision:*\n` +
+          `• Swipe-reply to ANY previous message, bug report, or idea and tag @${botDisplayName} — I'll see what you quoted and answer directly!\n\n` +
+          `🎥 *Video Analysis:*\n` +
+          `• Send or quote short demo videos, screen recordings, or UI walkthroughs (under 10 MB) — I can watch and give feedback.\n\n` +
+          `🧠 *Long-Term Memory & Profile Vault:*\n` +
+          `• I remember everyone's email, full name, stack, and focus area permanently so nothing gets lost.\n\n` +
+          `🏷️ *Cleaner Tagging:*\n` +
+          `• Fixed the tagging bug — no more random DRC country code phone tags when assigning tasks.\n\n` +
+          `🎛️ *Squad Operating Modes (/mode):*\n` +
+          `• */mode sprint* — Hyper-active hackathon mode (I chime in on all bugs & discussions)\n` +
+          `• */mode normal* — Balanced everyday teammate (default)\n` +
+          `• */mode quiet* — Deep focus mode (I only speak when tagged @${botDisplayName})\n\n` +
+          `🔇 *Pause & Resume:*\n` +
+          `• Need private squad time? Use */pause* to silence me, and */resume* to wake me up.\n\n` +
+          `🗑️ *Project Reset:*\n` +
+          `• */forget project [name]* — Instantly wipe old tasks & deadlines for completed projects.\n\n` +
+          `🎭 *Better Nigerian Slang, Sarcasm & Stickers:*\n` +
+          `• I read stickers, memes, sarcasm, and Naija banter naturally without forcing everything into code talk.\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `⚡ *Quick Shortcuts:*\n` +
+          `• */tasks* — Open team tasks\n` +
+          `• */standup* — Daily brief\n` +
+          `• */countdown* — Live deadline clocks\n` +
+          `• */whatsnew* — See this update brief anytime\n` +
+          `• */help* — See all commands\n\n` +
+          `_Tag @${botDisplayName} or reply to any message — I dey for you. Let's build!_ 💪🔥`;
+
+        await sendSafeMessage(sock, remoteJid, reactivationMsg, msg);
+        return;
+      }
+
       const welcome =
         `Yo squad! *${botDisplayName}* is in the building 🇳🇬🚀\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -797,6 +838,22 @@ export async function handleMessage(sock, msg) {
 
       await sendSafeMessage(sock, remoteJid, welcome, msg);
     } else {
+      if (wasAlreadyAuthorized) {
+        const reactivationDM =
+          `⚡ *${botDisplayName} is Back & Upgraded!* 🇳🇬✨\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `Hey *${senderName}*! I'm re-activated and ready to roll.\n\n` +
+          `🔥 *Latest Superpowers in My Brain:*\n` +
+          `• 👁️ *Quote Vision:* Reply to any previous message and tag me — I read the quoted message directly.\n` +
+          `• 🎥 *Video Support:* Send demo videos or screen recordings (under 10 MB) — I watch and analyze them.\n` +
+          `• 🧠 *Profile Memory:* Tell me your email or what you're building — I save it permanently in your profile.\n` +
+          `• 🎭 *Sarcasm, Slang & Stickers:* Natural Naija banter, meme & sticker understanding.\n\n` +
+          `Type */mytasks*, */whatsnew*, or */help*. What are we cooking today? 🚀`;
+
+        await sendSafeMessage(sock, remoteJid, reactivationDM, msg);
+        return;
+      }
+
       const welcomeDM =
         `Hey *${senderName}*! I'm *${botDisplayName}* 🇳🇬✨\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -873,6 +930,7 @@ export async function handleMessage(sock, msg) {
     const helpText =
       `🤖 *${botName} Commands & Quick Guide*\n\n` +
       `*⚡ Fast Commands (Instant Response):*\n` +
+      `• */whatsnew* — View D's latest features, upgrades & changelog\n` +
       `• */activate* — Register & bring bot to life in a group or DM\n` +
       `• */tasks* — View all active open team tasks\n` +
       `• */deadlines* — View approaching project & hackathon deadlines\n` +
@@ -910,6 +968,43 @@ export async function handleMessage(sock, msg) {
       `• Share flyers 📄, UI mockups 🖼️, or docs for automatic analysis.\n` +
       `• The bot will call out overdue tasks & inactive members — professionally but directly.`;
     await sendSafeMessage(sock, remoteJid, helpText, msg);
+    return;
+  }
+
+  // What's new / changelog command
+  if (isCommand('whatsnew') || isCommand('updates') || isCommand('changelog')) {
+    const botDisplayName = process.env.BOT_NAME || 'D';
+    const updatesMsg =
+      `🚀 *What's New in ${botDisplayName} 2.0* 🇳🇬✨\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `Here are all the latest upgrades running in my system:\n\n` +
+      `👁️ *1. Quoted Message Vision*\n` +
+      `• Swipe-reply to any previous message, code snippet, or bug in chat and tag @${botDisplayName}.\n` +
+      `• I now read the replied message directly and answer with full context!\n\n` +
+      `🎥 *2. Video Analysis*\n` +
+      `• Send or quote short videos (screen recordings, UI demos, walkthroughs, or memes under 10 MB).\n` +
+      `• I can watch and break down what is happening.\n\n` +
+      `🧠 *3. Full Profile Memory & Email Storage*\n` +
+      `• I permanently remember everyone's email, full name, and notes in the Team Directory.\n` +
+      `• Multi-turn conversation memory expanded to 8 turns for smoother, deeper context.\n\n` +
+      `🏷️ *4. Clean Member Tagging*\n` +
+      `• Fixed the phone number tagging bug — no more random DRC numbers from internal WhatsApp LIDs.\n\n` +
+      `🎛️ *5. Group Operating Modes (/mode)*\n` +
+      `• */mode sprint* — Hyper-active for crunch times & hackathons\n` +
+      `• */mode normal* — Balanced everyday teammate (default)\n` +
+      `• */mode quiet* — Speaks ONLY when tagged @${botDisplayName}\n\n` +
+      `🔇 *6. Pause & Resume Controls*\n` +
+      `• */pause* — Silence me temporarily\n` +
+      `• */resume* — Wake me back up\n\n` +
+      `🗑️ *7. Project Forgetting*\n` +
+      `• */forget project [name]* — Wipe out old tasks, deadlines & notes for finished projects\n\n` +
+      `🎭 *8. Nigerian Slang, Sarcasm & Stickers*\n` +
+      `• Authentic Naija tech ecosystem vibe, sarcasm detection, and sticker reaction understanding.\n` +
+      `• Natural, human replies without forcing everything into coding jargon.\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `_Type */help* for all shortcuts, or tag @${botDisplayName} anytime!_ 🔥`;
+
+    await sendSafeMessage(sock, remoteJid, updatesMsg, msg);
     return;
   }
 
