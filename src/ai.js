@@ -35,6 +35,8 @@ import {
   getNow,
   saveResource,
   listResources,
+  getTasksByMember,
+  searchMembersBySkill,
 } from './db.js';
 
 // ─── Client ──────────────────────────────────────────────────────────────────
@@ -335,6 +337,29 @@ const TOOLS = [
           required: [],
         },
       },
+      {
+        name: 'find_skill_experts',
+        description:
+          'Search the team directory for members who specialize in or know a specific skill, tech stack, tool, framework, or area of focus. Call this when someone asks "who knows...", "who is handling...", or asks for a recommendation on who to contact regarding a topic.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            query: { type: 'STRING', description: 'The skill, language, framework, or topic to search for, e.g. "Docker", "Figma", "Payments", "Flutter"' },
+          },
+          required: ['query'],
+        },
+      },
+      {
+        name: 'get_my_day',
+        description:
+          'Get a prioritized daily focus overview for a team member, including overdue items, in-progress tasks, and approaching project deadlines. Call this when someone asks what they should work on, asks for their daily game plan, or asks to plan their day.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            member_name: { type: 'STRING', description: 'Name of the member asking for their daily plan' },
+          },
+        },
+      },
     ],
   },
 ];
@@ -520,6 +545,40 @@ function executeTool(name, args, pendingDms = null, meta = {}) {
       });
       return { success: true, resources: items, count: items.length };
     }
+    case 'find_skill_experts': {
+      const experts = searchMembersBySkill(args.query);
+      return {
+        query: args.query,
+        found: experts.length,
+        members: experts.map((m) => ({
+          name: m.name,
+          role: m.role || 'Teammate',
+          skills: m.skills || 'Not specified',
+          focus: m.bio_notes || '',
+          notes: m.extra_info || '',
+          tag_safe: m.jid && m.jid.endsWith('@s.whatsapp.net') ? `@${m.jid.split('@')[0]}` : m.name,
+        })),
+      };
+    }
+    case 'get_my_day': {
+      const jid = meta.senderJid;
+      const name = args.member_name || meta.senderName || '';
+      const tasks = getTasksByMember(jid, name);
+      const open = tasks.filter((t) => t.status !== 'done');
+      const overdue = open.filter((t) => t.due_date && new Date(t.due_date).getTime() < Date.now());
+      const inProgress = open.filter((t) => t.status === 'in_progress');
+      const blocked = open.filter((t) => t.status === 'blocked');
+      const deadlines = getUpcomingDeadlines().slice(0, 3);
+      return {
+        member_name: name,
+        total_open: open.length,
+        overdue: overdue.map((t) => ({ id: t.id, title: t.title, due_date: t.due_date })),
+        in_progress: inProgress.map((t) => ({ id: t.id, title: t.title })),
+        blocked: blocked.map((t) => ({ id: t.id, title: t.title, reason: t.block_reason })),
+        all_open: open.map((t) => ({ id: t.id, title: t.title, status: t.status, project: t.project_name })),
+        upcoming_deadlines: deadlines.map((d) => ({ title: d.title, due_date: d.due_date })),
+      };
+    }
     default:
       return { success: false, error: `Unknown tool: ${name}` };
   }
@@ -675,6 +734,23 @@ You have access to the last 30 messages in immediate context, plus the permanent
 • Treat that quoted message as the primary topic or question being discussed.
 • If the user only tagged you (e.g. "@D", "D?") without typing much else, they want you to review, answer, solve, explain, or chime in on the quoted message.
 • Understand who sent the quoted message and what they were discussing (a bug, idea, question, design decision, blocker, or task), and address it directly.
+
+═══ VOICE NOTE MEETING & CALL RECAPS ═══
+• When a user sends or replies to a voice note with requests like "recap", "summarize", "meeting notes", "decisions", "minutes", or "action items":
+  Extract and organize the audio content into:
+  - 🎯 *Key Decisions Made*
+  - 📋 *Action Items & Assignees* (match to specific teammates if named in the audio)
+  - ⏰ *Deadlines or Timelines Mentioned*
+  - 💡 *Next Steps*
+  - End with: "Want me to turn these action items into tasks on our board right now? Just say 'Yes, create them'!"
+
+═══ SKILL & EXPERT MATCHMAKER ═══
+• When anyone asks "who knows...", "who sabi...", "who is handling...", or asks who can help with a language, framework, database, or tool:
+  Call find_skill_experts with the query. Present the matching teammates with their roles, skills, current focus, and safe tags warmly like a teammate making an intro.
+
+═══ PERSONAL DAILY FOCUS (/myday) ═══
+• When a user asks "what should I focus on today?", "plan my day", or runs /myday:
+  Call get_my_day to retrieve their open tasks, overdue blockers, and deadlines. Give them a sharp, prioritized 3-part game plan with genuine encouragement.
 
 ═══ STICKER & MEME INTELLIGENCE ═══
 • When a sticker arrives, understand it as a social/emotional signal — a reaction, a mood, a joke, a flex, a vibe.

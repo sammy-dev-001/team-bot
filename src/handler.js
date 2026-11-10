@@ -30,6 +30,7 @@ import {
   reassignTask,
   setTaskBlockReason,
   findMemberByName,
+  searchMembersBySkill,
   getMember,
   getMessageByMsgId,
   createReminder,
@@ -931,6 +932,8 @@ export async function handleMessage(sock, msg) {
       `🤖 *${botName} Commands & Quick Guide*\n\n` +
       `*⚡ Fast Commands (Instant Response):*\n` +
       `• */whatsnew* — View D's latest features, upgrades & changelog\n` +
+      `• */myday* — Your prioritized daily focus & game plan for today\n` +
+      `• */whois [skill]* — Find teammates who know a specific tech, stack or tool\n` +
       `• */activate* — Register & bring bot to life in a group or DM\n` +
       `• */tasks* — View all active open team tasks\n` +
       `• */deadlines* — View approaching project & hackathon deadlines\n` +
@@ -951,7 +954,8 @@ export async function handleMessage(sock, msg) {
       `• */block #5 [reason]* — Mark task #5 as blocked\n` +
       `• */assign #5 David* — Reassign task #5 to David\n` +
       `• */remind in 30 mins to [action]* — Set a personal reminder\n` +
-      `• */poll "Question" "Opt 1" "Opt 2"* — Launch a native WhatsApp poll\n\n` +
+      `• */poll "Question" "Opt 1" "Opt 2"* — Launch a native WhatsApp poll\n` +
+      `• */vibe* — Launch a squad energy & burnout check poll\n\n` +
       `*🎛️ Group Behaviour Modes (use /mode to check):*\n` +
       `• */mode sprint* — 🚀 *Sprint Mode*: Hyper-active! D joins every question, debate, and bug. Use during hackathons or deadline crunches.\n` +
       `• */mode normal* — ⚖️ *Normal Mode*: Balanced (default). Chimes in selectively on real blockers & questions.\n` +
@@ -1219,7 +1223,7 @@ export async function handleMessage(sock, msg) {
   // /mytasks — personal task list (works in DM and group)
   if (isCommand('mytasks')) {
     const myJid = senderJid;
-    const myTasks = getTasksByMember(myJid);
+    const myTasks = getTasksByMember(myJid, senderName);
     if (myTasks.length === 0) {
       await sendSafeMessage(sock, remoteJid, `🎉 *No tasks assigned to you!* The board is clear for you right now.`, msg);
     } else {
@@ -1238,6 +1242,153 @@ export async function handleMessage(sock, msg) {
       reply = reply.trim();
       await sendSafeMessage(sock, remoteJid, reply, msg);
     }
+    return;
+  }
+
+  // /myday — prioritized personal daily game plan (Feature 2)
+  if (isCommand('myday')) {
+    const myTasks = getTasksByMember(senderJid, senderName);
+    const open = myTasks.filter((t) => t.status !== 'done');
+    const overdue = open.filter((t) => t.due_date && new Date(t.due_date).getTime() < Date.now());
+    const inProgress = open.filter((t) => t.status === 'in_progress');
+    const blocked = open.filter((t) => t.status === 'blocked');
+    const upcomingDeadlines = getUpcomingDeadlines().slice(0, 3);
+
+    const tz = process.env.TIMEZONE || 'Africa/Lagos';
+    const dateStr = new Intl.DateTimeFormat('en-NG', {
+      timeZone: tz,
+      dateStyle: 'full',
+    }).format(new Date());
+
+    if (open.length === 0) {
+      const freeMsg =
+        `🌅 *Daily Game Plan for ${senderName}* 🇳🇬✨\n` +
+        `📅 ${dateStr}\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `You have *zero open tasks* assigned to you right now! 🎉 The board is clean.\n\n` +
+        `💡 *Quick Suggestions:*\n` +
+        `• Check squad backlog with */tasks* to pick up unassigned items\n` +
+        `• Check sprint clocks with */countdown*\n` +
+        `• Focus on deep learning or architecture today!\n\n` +
+        `_Need anything? Just tag @D or chat with me anytime._ 🚀`;
+      await sendSafeMessage(sock, remoteJid, freeMsg, msg);
+      return;
+    }
+
+    let planMsg =
+      `🌅 *Your Daily Game Plan, ${senderName}* 🇳🇬🎯\n` +
+      `📅 ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    if (overdue.length > 0) {
+      planMsg += `🚨 *CRITICAL / OVERDUE (${overdue.length}):*\n`;
+      for (const t of overdue) {
+        const proj = t.project_name ? ` [${t.project_name}]` : '';
+        planMsg += `• ⚠️ *#${t.id}*${proj} ${t.title} (due: ${t.due_date.slice(0, 16)})\n`;
+      }
+      planMsg += '\n';
+    }
+
+    if (inProgress.length > 0) {
+      planMsg += `🔥 *In-Flight Focus (${inProgress.length}):*\n`;
+      for (const t of inProgress) {
+        const proj = t.project_name ? ` [${t.project_name}]` : '';
+        planMsg += `• 🔄 *#${t.id}*${proj} ${t.title}\n`;
+      }
+      planMsg += '\n';
+    }
+
+    const todo = open.filter((t) => t.status === 'todo');
+    if (todo.length > 0) {
+      planMsg += `📋 *Up Next Today (${todo.length}):*\n`;
+      for (const t of todo.slice(0, 4)) {
+        const proj = t.project_name ? ` [${t.project_name}]` : '';
+        const due = t.due_date ? ` (due: ${t.due_date.slice(0, 16)})` : '';
+        planMsg += `• ⏳ *#${t.id}*${proj} ${t.title}${due}\n`;
+      }
+      if (todo.length > 4) planMsg += `  _...and ${todo.length - 4} more on your /mytasks list_\n`;
+      planMsg += '\n';
+    }
+
+    if (blocked.length > 0) {
+      planMsg += `🛑 *Blocked Watchlist (${blocked.length}):*\n`;
+      for (const t of blocked) {
+        const reason = t.block_reason ? ` — ${t.block_reason}` : '';
+        planMsg += `• 🔴 *#${t.id}* ${t.title}${reason}\n`;
+      }
+      planMsg += '\n';
+    }
+
+    if (upcomingDeadlines.length > 0) {
+      planMsg += `⏳ *Approaching Deadlines:*\n`;
+      for (const d of upcomingDeadlines) {
+        const diffMs = new Date(d.due_date).getTime() - Date.now();
+        let remaining = '';
+        if (diffMs > 0) {
+          const days = Math.floor(diffMs / 86400000);
+          const hrs = Math.floor((diffMs % 86400000) / 3600000);
+          remaining = ` (${days}d ${hrs}h left)`;
+        } else {
+          remaining = ' [OVERDUE]';
+        }
+        planMsg += `• 📅 ${d.title}${remaining}\n`;
+      }
+      planMsg += '\n';
+    }
+
+    planMsg +=
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `💡 *D's Take:* Tackle the blockers & in-progress work first, then roll into the backlog. Lock in and let's clear this board! 💪`;
+
+    await sendSafeMessage(sock, remoteJid, planMsg, msg);
+    return;
+  }
+
+  // /whois, /skills, /who — Teammate Skill & Expert Matchmaker (Feature 4)
+  if (isCommandWithArg('whois') || isCommandWithArg('skills') || isCommandWithArg('who')) {
+    const rawArg = text.replace(/^(?:\/(?:whois|skills|who)|@bot (?:whois|skills|who)|\/bot (?:whois|skills|who)|@[a-zA-Z0-9_]+ (?:whois|skills|who)|(?:whois|skills|who))\s*/i, '').trim();
+    if (!rawArg) {
+      await sendSafeMessage(sock, remoteJid, `💡 *Usage:* */whois [technology/skill/topic]*\n_Example: \`/whois docker\`, \`/whois figma\`, \`/whois react\`_`, msg);
+      return;
+    }
+
+    const matches = searchMembersBySkill(rawArg);
+    if (matches.length === 0) {
+      await sendSafeMessage(
+        sock,
+        remoteJid,
+        `🔍 *No teammate found for "${rawArg}"* in our directory yet! 😅\n\n` +
+        `If you or someone in the squad handles this, drop a quick intro like:\n` +
+        `• *Role:* [Your Role]\n` +
+        `• *Stack:* [Skills including ${rawArg}]\n` +
+        `↳ _I'll save it automatically so everyone knows who to call!_ 🚀`,
+        msg
+      );
+      return;
+    }
+
+    const lines = matches.map((m) => {
+      const isPhone = m.jid && m.jid.endsWith('@s.whatsapp.net');
+      const tag = isPhone ? `@${m.jid.split('@')[0]}` : m.name;
+      const role = m.role ? ` | *${m.role}*` : '';
+      const skills = m.skills ? `\n  🛠️ *Skills:* ${m.skills}` : '';
+      const focus = m.bio_notes ? `\n  🎯 *Focus:* ${m.bio_notes}` : '';
+      const email = m.email ? `\n  📧 *Email:* ${m.email}` : '';
+      return `• *${m.name}* (${tag})${role}${skills}${focus}${email}`;
+    }).join('\n\n');
+
+    const mentionJids = matches
+      .filter((m) => m.jid && m.jid.endsWith('@s.whatsapp.net'))
+      .map((m) => m.jid);
+
+    const reply =
+      `🔍 *Squad Experts for "${rawArg}" (${matches.length})*\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      lines +
+      `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `_Reach out to any of them if you need a hand or architecture review!_ 🤝`;
+
+    await sendSafeMessage(sock, remoteJid, reply, msg, mentionJids);
     return;
   }
 
@@ -1320,7 +1471,23 @@ export async function handleMessage(sock, msg) {
     return;
   }
 
-  // /remind [in X mins/hours/days] to [action]
+  // /vibe or /vibecheck — Launch squad vibe & burnout check poll (Feature 5)
+  if (isCommand('vibe') || isCommand('vibecheck')) {
+    await sendPollMessage(
+      sock,
+      remoteJid,
+      '⚡ Squad Vibe Check: How is sprint energy looking?',
+      [
+        '🔥 Cooking with gas (On track)',
+        '💻 Head down in the code',
+        '☕ Need more coffee / energy',
+        '🛑 Blocked & stressed',
+        '🏖️ Chilling, tasks cleared',
+      ],
+      1
+    );
+    return;
+  }
   if (isCommandWithArg('remind')) {
     const raw = text.replace(/^(\/remind|@bot\s+remind|\/bot\s+remind|@[a-zA-Z0-9_]+\s+remind|\/[a-zA-Z0-9_]+\s+remind)\s*/i, '').trim();
     const match = raw.match(/^(?:in\s+)?(\d+)\s*(m|min|mins|minutes|h|hr|hrs|hours|d|day|days)\s+(?:to\s+)?(.+)$/i);
@@ -1708,7 +1875,16 @@ Decision Rules:
 
   if (mediaData) {
     if (mediaData.type === 'audio') {
-      enrichedMessage += `\n\n[VOICE NOTE ATTACHED — Listen to the audio voice note carefully. Transcribe or address what the speaker is saying, answer their question, or execute any task assignment / deadline creation requested in the audio.]`;
+      const isRecap =
+        /\b(recap|summariz|summary|action items|meeting|decisions|minutes|notes|takeaways)\b/i.test(text || '') ||
+        /\b(recap|summariz|summary|action items|meeting|decisions|minutes|notes|takeaways)\b/i.test(quotedInfo?.text || '') ||
+        /\b(recap|summariz|summary|action items|meeting|decisions|minutes|notes|takeaways)\b/i.test(userContent || '');
+
+      if (isRecap) {
+        enrichedMessage += `\n\n[VOICE NOTE MEETING / CALL RECAP REQUEST — The user wants an executive meeting recap of this audio]:\nPlease format your response into a clean, executive meeting summary for the squad:\n🎯 *Key Decisions Made*\n📋 *Action Items & Assignees* (match to specific teammates if named in the audio)\n⏰ *Deadlines or Timelines Mentioned*\n💡 *Next Steps*\nAnd end by offering: "Want me to turn these action items into tasks on our board right now? Just say 'Yes, create them'!"`;
+      } else {
+        enrichedMessage += `\n\n[VOICE NOTE ATTACHED — Listen to the audio voice note carefully. Transcribe or address what the speaker is saying, answer their question, or execute any task assignment / deadline creation requested in the audio.]`;
+      }
     } else if (mediaData.type === 'video') {
       enrichedMessage += `\n\n[VIDEO ATTACHED — Watch the video carefully. Describe or analyse what is happening in it. If it's a demo, screen recording, or walkthrough: give feedback. If there's speech or captions, respond to the content of what's being said. If it's a meme or funny clip, react naturally with appropriate banter as D.]`;
     } else if (mediaData.type === 'document') {

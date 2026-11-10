@@ -287,6 +287,20 @@ export function findMemberByName(name) {
   `).get(lower, lower);
 }
 
+/** Search members by skill, stack, role, or area of focus (case-insensitive). */
+export function searchMembersBySkill(query) {
+  if (!query) return [];
+  const pattern = `%${query.toLowerCase().trim()}%`;
+  return db.prepare(`
+    SELECT * FROM team_members
+    WHERE lower(skills) LIKE ?
+       OR lower(role) LIKE ?
+       OR lower(bio_notes) LIKE ?
+       OR lower(extra_info) LIKE ?
+    ORDER BY name ASC
+  `).all(pattern, pattern, pattern, pattern);
+}
+
 /** Check if a member JID is already registered in the directory. */
 export function isMemberRegistered(jid) {
   if (!jid) return false;
@@ -687,7 +701,24 @@ export function getBlockedTasks() {
  * Get all tasks for a specific member JID, sorted by urgency.
  * Open tasks first (in_progress > blocked > todo), then done.
  */
-export function getTasksByMember(jid) {
+export function getTasksByMember(jid, name = '') {
+  if (name) {
+    return db.prepare(`
+      SELECT * FROM tasks
+      WHERE assigned_to_jid = ?
+         OR (assigned_to_name != '' AND LOWER(assigned_to_name) = LOWER(?))
+      ORDER BY
+        CASE status
+          WHEN 'in_progress' THEN 1
+          WHEN 'blocked'     THEN 2
+          WHEN 'todo'        THEN 3
+          WHEN 'done'        THEN 4
+          ELSE 5
+        END,
+        CASE WHEN due_date = '' THEN 1 ELSE 0 END,
+        datetime(due_date) ASC
+    `).all(jid, name.trim());
+  }
   return db.prepare(`
     SELECT * FROM tasks
     WHERE assigned_to_jid = ?

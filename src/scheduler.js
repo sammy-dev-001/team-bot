@@ -46,7 +46,7 @@ import {
   generateAdminBriefing,
   generateWeeklyVelocityReport,
 } from './ai.js';
-import { sendSafeMessage } from './whatsapp.js';
+import { sendSafeMessage, sendPollMessage } from './whatsapp.js';
 
 const TIMEZONE = process.env.TIMEZONE || 'Africa/Lagos';
 
@@ -424,6 +424,33 @@ async function runDueReminderWatchdog(sock) {
   }
 }
 
+// ─── Job 8: Thursday 2:30 PM Weekly Squad Vibe Check ────────────────────────
+
+async function runSquadVibeCheck(sock) {
+  const groups = getTargetGroups();
+  if (groups.length === 0) return;
+
+  console.log('[Scheduler] ⚡ Running Thursday 2:30 PM Squad Vibe Check…');
+
+  const question = '⚡ Mid-Week Squad Vibe Check: How is sprint energy looking?';
+  const options = [
+    '🔥 Cooking with gas (On track)',
+    '💻 Head down in the code',
+    '☕ Need more coffee / energy',
+    '🛑 Blocked & stressed',
+    '🏖️ Chilling, tasks cleared',
+  ];
+
+  for (const groupJid of groups) {
+    try {
+      await sendPollMessage(sock, groupJid, question, options, 1);
+      console.log(`[Scheduler] 📊 Squad vibe poll sent to ${groupJid}`);
+    } catch (err) {
+      console.error(`[Scheduler] Failed to send vibe poll to ${groupJid}:`, err.message);
+    }
+  }
+}
+
 // ─── Bootstrap scheduler ─────────────────────────────────────────────────────
 
 /**
@@ -514,12 +541,24 @@ export function startScheduler(getSocket) {
     { timezone: TIMEZONE }
   );
 
+  // 8. Weekly Squad Vibe Check: 2:30 PM Thursdays
+  cron.schedule(
+    '30 14 * * 4',
+    () => {
+      const sock = getSocket();
+      if (!sock) return console.warn('[Scheduler] Squad vibe check skipped — socket not ready.');
+      runSquadVibeCheck(sock);
+    },
+    { timezone: TIMEZONE }
+  );
+
   console.log(`[Scheduler] ✅ All jobs scheduled (timezone: ${TIMEZONE})`);
   console.log('  • Due Reminder Watchdog          → every minute (* * * * *)');
   console.log('  • Admin Private Briefing         → 7:45 AM daily');
   console.log('  • Group Standup Brief            → 8:00 AM daily');
   console.log('  • Accountability & Struggle Ping → 2:00 PM Mon-Fri');
   console.log('  • Weekly Velocity & Retro Report → 5:00 PM Fridays');
+  console.log('  • Weekly Squad Vibe Check        → 2:30 PM Thursdays');
   console.log('  • Hourly Deadline Watchdog       → every :00');
   console.log('  • Weekly Chat Pruning            → 3:00 AM Sundays (>= 90 days retention)');
 }
