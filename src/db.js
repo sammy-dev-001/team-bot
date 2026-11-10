@@ -77,6 +77,8 @@ db.exec(`
     role         TEXT DEFAULT '',
     skills       TEXT DEFAULT '',
     bio_notes    TEXT DEFAULT '',
+    email        TEXT DEFAULT '',
+    extra_info   TEXT DEFAULT '',
     updated_at   TEXT DEFAULT (datetime('now'))
   );
 
@@ -214,6 +216,8 @@ const tableMigrations = [
   `ALTER TABLE tasks ADD COLUMN block_reason TEXT DEFAULT '';`,
   `ALTER TABLE tasks ADD COLUMN notified_overdue_at TEXT DEFAULT '';`,
   `ALTER TABLE authorized_chats ADD COLUMN chime_mode TEXT DEFAULT 'normal';`,
+  `ALTER TABLE team_members ADD COLUMN email TEXT DEFAULT '';`,
+  `ALTER TABLE team_members ADD COLUMN extra_info TEXT DEFAULT '';`,
 ];
 for (const sql of tableMigrations) {
   try { db.exec(sql); } catch (e) { /* Column already exists */ }
@@ -236,25 +240,27 @@ export function ensureMemberExists(jid, name) {
  * Full upsert — merges new fields with existing data (won't overwrite
  * existing values with blanks).
  */
-export function upsertMember({ jid, name, aliases, role, skills, bio_notes }) {
+export function upsertMember({ jid, name, aliases, role, skills, bio_notes, email, extra_info }) {
   const existing = db.prepare('SELECT * FROM team_members WHERE jid = ?').get(jid);
   const now = getNow();
   if (existing) {
     db.prepare(`
       UPDATE team_members SET
-        name      = COALESCE(NULLIF(?, ''), name),
-        aliases   = COALESCE(NULLIF(?, ''), aliases),
-        role      = COALESCE(NULLIF(?, ''), role),
-        skills    = COALESCE(NULLIF(?, ''), skills),
-        bio_notes = COALESCE(NULLIF(?, ''), bio_notes),
+        name       = COALESCE(NULLIF(?, ''), name),
+        aliases    = COALESCE(NULLIF(?, ''), aliases),
+        role       = COALESCE(NULLIF(?, ''), role),
+        skills     = COALESCE(NULLIF(?, ''), skills),
+        bio_notes  = COALESCE(NULLIF(?, ''), bio_notes),
+        email      = COALESCE(NULLIF(?, ''), email),
+        extra_info = COALESCE(NULLIF(?, ''), extra_info),
         updated_at = ?
       WHERE jid = ?
-    `).run(name, aliases, role, skills, bio_notes, now, jid);
+    `).run(name, aliases, role, skills, bio_notes, email, extra_info, now, jid);
   } else {
     db.prepare(`
-      INSERT INTO team_members (jid, name, aliases, role, skills, bio_notes, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(jid, name || jid.split('@')[0], aliases || '', role || '', skills || '', bio_notes || '', now);
+      INSERT INTO team_members (jid, name, aliases, role, skills, bio_notes, email, extra_info, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(jid, name || jid.split('@')[0], aliases || '', role || '', skills || '', bio_notes || '', email || '', extra_info || '', now);
   }
   return db.prepare('SELECT * FROM team_members WHERE jid = ?').get(jid);
 }

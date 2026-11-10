@@ -182,10 +182,10 @@ function extractMessageText(msg) {
   );
 }
 
-// ─── Media Attachment Extractor (Images, Voice Notes, Documents) ──────────────
+// ─── Media Attachment Extractor (Images, Audio, Video, Documents) ──────────────
 
 /**
- * Returns media metadata if the message contains an image, audio voice note, or document.
+ * Returns media metadata if the message contains an image, audio voice note, video, or document.
  */
 function getMediaAttachment(msg) {
   const m = getUnwrappedMessage(msg);
@@ -197,6 +197,9 @@ function getMediaAttachment(msg) {
   }
   if (m.stickerMessage) {
     return { type: 'sticker', mediaMsg: m.stickerMessage, mimeType: m.stickerMessage.mimetype || 'image/webp', isQuoted: false, msg };
+  }
+  if (m.videoMessage) {
+    return { type: 'video', mediaMsg: m.videoMessage, mimeType: m.videoMessage.mimetype || 'video/mp4', isQuoted: false, msg };
   }
   if (m.audioMessage) {
     return { type: 'audio', mediaMsg: m.audioMessage, mimeType: m.audioMessage.mimetype || 'audio/ogg; codecs=opus', isQuoted: false, msg };
@@ -213,6 +216,9 @@ function getMediaAttachment(msg) {
   }
   if (quoted?.stickerMessage) {
     return { type: 'sticker', mediaMsg: quoted.stickerMessage, mimeType: quoted.stickerMessage.mimetype || 'image/webp', isQuoted: true, msg };
+  }
+  if (quoted?.videoMessage) {
+    return { type: 'video', mediaMsg: quoted.videoMessage, mimeType: quoted.videoMessage.mimetype || 'video/mp4', isQuoted: true, msg };
   }
   if (quoted?.audioMessage) {
     return { type: 'audio', mediaMsg: quoted.audioMessage, mimeType: quoted.audioMessage.mimetype || 'audio/ogg; codecs=opus', isQuoted: true, msg };
@@ -443,6 +449,10 @@ function extractAndSaveResources(remoteJid, text, senderName, senderJid) {
 function parseMemberIntro(text) {
   if (!text || text.length < 5) return null;
 
+  // Extract email if present anywhere in the text
+  const emailMatch = text.match(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/);
+  const email = emailMatch ? emailMatch[1].trim() : '';
+
   // Format 1: Key-value pairs (Name: ..., Role: ..., Skills/Stack: ...)
   const hasIntroKeys = /(?:name|alias|role|title|skills|stack|tech)\s*[:=-]/i.test(text);
   if (hasIntroKeys) {
@@ -457,6 +467,7 @@ function parseMemberIntro(text) {
         role: roleMatch ? roleMatch[1].trim() : '',
         skills: skillsMatch ? skillsMatch[1].trim() : '',
         bio: bioMatch ? bioMatch[1].trim() : '',
+        email,
       };
     }
   }
@@ -469,6 +480,7 @@ function parseMemberIntro(text) {
       role: naturalMatch[2] ? naturalMatch[2].trim() : '',
       skills: naturalMatch[3] ? naturalMatch[3].trim() : '',
       bio: '',
+      email,
     };
   }
 
@@ -705,6 +717,7 @@ export async function handleMessage(sock, msg) {
       role: introData.role,
       skills: introData.skills,
       bio_notes: introData.bio,
+      email: introData.email,
     });
 
     const isPhone = senderJid.endsWith('@s.whatsapp.net');
@@ -718,6 +731,7 @@ export async function handleMessage(sock, msg) {
     const confirmMsg =
       `✅ *Profile Saved for ${tag}!* 👤\n\n` +
       `• *Name:* ${member.name}\n` +
+      (member.email ? `• *Email:* ${member.email}\n` : '') +
       `• *Role:* ${member.role || 'Teammate'}\n` +
       `• *Skills:* ${member.skills || 'General Engineering'}\n` +
       (member.bio_notes ? `• *Focus:* ${member.bio_notes}\n` : '') +
@@ -767,6 +781,7 @@ export async function handleMessage(sock, msg) {
       `• Tag *@${botName}* or reply to any bot message to chat, debug, plan, or ask anything.\n` +
       `• Understands Nigerian English, Pidgin, sarcasm, and stickers 🎭\n` +
       `• Send voice notes 🎙️ to ask questions or assign tasks on the go.\n` +
+      `• Send short videos 🎥 for analysis — demos, screen recordings, or funny clips (under 10 MB).\n` +
       `• Share flyers 📄, UI mockups 🖼️, or docs for automatic analysis.\n` +
       `• The bot will call out overdue tasks & inactive members — professionally but directly.`;
     await sendSafeMessage(sock, remoteJid, helpText, msg);
@@ -1384,7 +1399,7 @@ export async function handleMessage(sock, msg) {
     return;
   }
 
-  // ── 6. Handle media multimodal download (image, audio, document) ─────────
+  // ── 6. Handle media multimodal download (image, audio, video, document) ──
 
   let mediaData = null;
   let voiceTranscription = null;
@@ -1402,6 +1417,7 @@ export async function handleMessage(sock, msg) {
     userContent = `(voice note: "${voiceTranscription}")` + (userContent ? ` — Note: ${userContent}` : '');
   } else if (!userContent && mediaData) {
     if (mediaData.type === 'audio') userContent = '(sent a voice note)';
+    else if (mediaData.type === 'video') userContent = '(sent a video)';
     else if (mediaData.type === 'document') userContent = '(shared a document)';
     else if (mediaData.type === 'sticker') userContent = '(sent a sticker)';
     else userContent = '(shared an image)';
@@ -1430,6 +1446,8 @@ Decision Rules:
   if (mediaData) {
     if (mediaData.type === 'audio') {
       enrichedMessage += `\n\n[VOICE NOTE ATTACHED — Listen to the audio voice note carefully. Transcribe or address what the speaker is saying, answer their question, or execute any task assignment / deadline creation requested in the audio.]`;
+    } else if (mediaData.type === 'video') {
+      enrichedMessage += `\n\n[VIDEO ATTACHED — Watch the video carefully. Describe or analyse what is happening in it. If it's a demo, screen recording, or walkthrough: give feedback. If there's speech or captions, respond to the content of what's being said. If it's a meme or funny clip, react naturally with appropriate banter as D.]`;
     } else if (mediaData.type === 'document') {
       enrichedMessage += `\n\n[DOCUMENT ATTACHED — Review the document carefully (e.g. PRD, specification, API docs, code). Provide insightful engineering feedback, answer questions, or extract any tasks / deadlines mentioned.]`;
     } else if (mediaData.type === 'sticker') {
