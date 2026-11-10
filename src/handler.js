@@ -31,6 +31,7 @@ import {
   setTaskBlockReason,
   findMemberByName,
   getMember,
+  getMessageByMsgId,
   createReminder,
   saveCodeSnippet,
   searchCodeSnippets,
@@ -182,6 +183,116 @@ function extractMessageText(msg) {
   );
 }
 
+// ─── Context & Quoted Message Extractor ───────────────────────────────────────
+
+/**
+ * Extracts contextInfo safely from any message wrapper.
+ */
+function getContextInfo(msg) {
+  const m = getUnwrappedMessage(msg);
+  if (!m) return null;
+  return (
+    m.extendedTextMessage?.contextInfo ||
+    m.imageMessage?.contextInfo ||
+    m.videoMessage?.contextInfo ||
+    m.documentMessage?.contextInfo ||
+    m.audioMessage?.contextInfo ||
+    m.stickerMessage?.contextInfo ||
+    msg?.message?.extendedTextMessage?.contextInfo ||
+    null
+  );
+}
+
+/**
+ * Extracts the full content and sender information of a quoted / replied-to message.
+ * Supports text, captions on images/videos/docs, stickers, voice notes, and polls.
+ * Falls back to looking up the message in SQLite if content is empty or omitted.
+ */
+function extractQuotedMessage(msg, botIds = null) {
+  const ctx = getContextInfo(msg);
+  if (!ctx || !ctx.quotedMessage) return null;
+
+  const q = ctx.quotedMessage;
+  const participantJid = ctx.participant || '';
+  const stanzaId = ctx.stanzaId || '';
+
+  // Extract text or description from the quoted message
+  let text = '';
+  let mediaType = null;
+
+  if (q.conversation) {
+    text = q.conversation;
+  } else if (q.extendedTextMessage?.text) {
+    text = q.extendedTextMessage.text;
+  } else if (q.imageMessage) {
+    mediaType = 'image';
+    text = q.imageMessage.caption ? `[Image with caption: "${q.imageMessage.caption}"]` : '[Image]';
+  } else if (q.videoMessage) {
+    mediaType = 'video';
+    text = q.videoMessage.caption ? `[Video with caption: "${q.videoMessage.caption}"]` : '[Video]';
+  } else if (q.documentMessage) {
+    mediaType = 'document';
+    const fileName = q.documentMessage.fileName || 'file';
+    text = q.documentMessage.caption ? `[Document "${fileName}": "${q.documentMessage.caption}"]` : `[Document "${fileName}"]`;
+  } else if (q.audioMessage) {
+    mediaType = 'audio';
+    text = q.audioMessage.ptt ? '[Voice Note]' : '[Audio message]';
+  } else if (q.stickerMessage) {
+    mediaType = 'sticker';
+    text = '[Sticker]';
+  } else if (q.pollCreationMessage || q.pollCreationMessageV2 || q.pollCreationMessageV3) {
+    const poll = q.pollCreationMessage || q.pollCreationMessageV2 || q.pollCreationMessageV3;
+    const opts = (poll.options || []).map((o) => o.optionName).join(', ');
+    text = `[Poll: "${poll.name || 'Untitled'}" — Options: ${opts}]`;
+  } else if (q.buttonsResponseMessage?.selectedDisplayText) {
+    text = q.buttonsResponseMessage.selectedDisplayText;
+  } else if (q.listResponseMessage?.title) {
+    text = q.listResponseMessage.title;
+  }
+
+  // If text is still empty, unwrap nested ephemeral or viewOnce wrappers
+  if (!text) {
+    const unwrapped = getUnwrappedMessage({ message: q });
+    if (unwrapped) {
+      text =
+        unwrapped.conversation ||
+        unwrapped.extendedTextMessage?.text ||
+        unwrapped.imageMessage?.caption ||
+        unwrapped.videoMessage?.caption ||
+        unwrapped.documentMessage?.caption ||
+        '';
+    }
+  }
+
+  // Fallback to SQLite DB if text was not provided in the payload (common with ephemeral or large messages)
+  if (!text && stanzaId) {
+    const dbMsg = getMessageByMsgId(stanzaId);
+    if (dbMsg?.content) {
+      text = dbMsg.content;
+    }
+  }
+
+  // Resolve sender name
+  const botName = process.env.BOT_NAME || 'D';
+  let senderName = '';
+  const isBot = botIds && participantJid && (botIds.has(participantJid) || botIds.has(jidNormalizedUser(participantJid)));
+  if (isBot) {
+    senderName = `${botName} (you)`;
+  } else if (participantJid) {
+    const member = getMember(participantJid);
+    senderName = member?.name || participantJid.split('@')[0];
+  }
+
+  return {
+    participantJid,
+    stanzaId,
+    text: text.trim(),
+    mediaType,
+    senderName: senderName || 'a teammate',
+    rawQuoted: q,
+  };
+}
+
 // ─── Media Attachment Extractor (Images, Audio, Video, Documents) ──────────────
 
 /**
@@ -209,7 +320,7 @@ function getMediaAttachment(msg) {
   }
 
   // Quoted media
-  const ctx = m.extendedTextMessage?.contextInfo;
+  const ctx = getContextInfo(msg);
   const quoted = ctx?.quotedMessage;
   if (quoted?.imageMessage) {
     return { type: 'image', mediaMsg: quoted.imageMessage, mimeType: quoted.imageMessage.mimetype || 'image/jpeg', isQuoted: true, msg };
@@ -257,13 +368,7 @@ function isDirectTrigger(msg, sock) {
   ].filter(Boolean));
 
   // 2. Check contextInfo across message types (supports ephemeral/disappearing messages)
-  const ctx =
-    m?.extendedTextMessage?.contextInfo ||
-    m?.imageMessage?.contextInfo ||
-    m?.videoMessage?.contextInfo ||
-    m?.documentMessage?.contextInfo ||
-    m?.stickerMessage?.contextInfo ||
-    msg?.message?.extendedTextMessage?.contextInfo;
+  const ctx = getContextInfo(msg);
 
   // 2a. Native WhatsApp @mentions
   const mentions = ctx?.mentionedJid || [];
@@ -278,6 +383,14 @@ function isDirectTrigger(msg, sock) {
   if (ctx?.participant) {
     const normParticipant = jidNormalizedUser(ctx.participant);
     if (botIds.has(ctx.participant) || botIds.has(normParticipant)) {
+      return true;
+    }
+  }
+
+  // 2c. When replying to a previous message, trigger if the reply includes bot name or tag
+  if (ctx?.quotedMessage) {
+    const botWordRegex = new RegExp(`\\b@?${botName}\\b`, 'i');
+    if (botWordRegex.test(text) || /\b@?bot\b/i.test(text)) {
       return true;
     }
   }
@@ -301,9 +414,12 @@ function isDirectTrigger(msg, sock) {
     text.startsWith(`${botName} `) ||
     text.startsWith(`${botName},`) ||
     text.startsWith(`${botName}:`) ||
+    text.startsWith(`${botName}?`) ||
+    text.startsWith(`${botName}!`) ||
     text === botName ||
     text.startsWith('@bot') ||
     text.startsWith('/bot') ||
+    new RegExp(`^@?${botName}[?!,.:;]*$`, 'i').test(text) ||
     new RegExp(`^(?:hey|yo|sup|hello|ask)\\s+${botName}\\b`, 'i').test(text)
   ) {
     return true;
@@ -328,7 +444,12 @@ function stripTriggerPrefix(text, botPhone = null) {
     .replace(new RegExp(`^(?:@bot|/bot|@${botName}|/${botName}|(?:hey|yo|sup|hello)\\s+${botName}|${botName})[,:]?\\s*`, 'i'), '')
     .trim();
 
-  return cleaned || text;
+  // If text only consisted of the trigger/mention (e.g. "@D", "D?", "@bot"), return empty string
+  if (new RegExp(`^@?${botName}[?!,.:;]*$`, 'i').test(text.trim())) {
+    return '';
+  }
+
+  return cleaned;
 }
 
 // ─── Multimodal Media Downloader (Image, Audio, Document) ─────────────────────
@@ -339,18 +460,21 @@ function stripTriggerPrefix(text, botPhone = null) {
  */
 async function downloadMediaAsBase64(sock, mediaObj) {
   try {
+    const ctx = getContextInfo(mediaObj.msg);
     const messageToDownload = mediaObj.isQuoted
       ? {
           key: {
             remoteJid: mediaObj.msg.key.remoteJid,
-            id: mediaObj.msg.message?.extendedTextMessage?.contextInfo?.stanzaId,
-            participant: mediaObj.msg.message?.extendedTextMessage?.contextInfo?.participant,
+            id: ctx?.stanzaId,
+            participant: ctx?.participant,
           },
           message: {
             [mediaObj.type === 'sticker'
               ? 'stickerMessage'
               : mediaObj.type === 'image'
               ? 'imageMessage'
+              : mediaObj.type === 'video'
+              ? 'videoMessage'
               : mediaObj.type === 'audio'
               ? 'audioMessage'
               : 'documentMessage']: mediaObj.mediaMsg,
@@ -545,6 +669,7 @@ export async function handleMessage(sock, msg) {
     sender_jid: senderJid,
     content: text || (hasMedia ? `[${mediaObj.type}]` : '[media]'),
     has_media: hasMedia,
+    msg_id: msg.key?.id || '',
   });
 
   // ── 2b. Auto-archive project links into Vault ─────────────────────────────
@@ -1383,7 +1508,14 @@ export async function handleMessage(sock, msg) {
 
   const botNormalizedJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
   const botPhone = botNormalizedJid ? botNormalizedJid.split('@')[0] : null;
-  const botJid = botNormalizedJid;
+  const botLid = sock?.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
+  const botIds = new Set([
+    sock?.user?.id,
+    botNormalizedJid,
+    botLid,
+    sock?.user?.lid,
+  ].filter(Boolean));
+
   const chimeMode = isGroup ? getChatChimeMode(remoteJid) : 'normal';
   // In private 1-on-1 DMs, always trigger a response
   const directTrigger = isDM || isDirectTrigger(msg, sock);
@@ -1412,6 +1544,17 @@ export async function handleMessage(sock, msg) {
 
   // ── 7. Build AI prompt ───────────────────────────────────────────────────
 
+  const quotedInfo = extractQuotedMessage(msg, botIds);
+  let quotedContextBlock = '';
+  if (quotedInfo && (quotedInfo.text || quotedInfo.mediaType)) {
+    const quotedSender = quotedInfo.senderName || 'a teammate';
+    const quotedBody = quotedInfo.text || `[${quotedInfo.mediaType}]`;
+    quotedContextBlock =
+      `\n═════ REPLIED-TO PREVIOUS MESSAGE (from ${quotedSender}) ═════\n` +
+      `"${quotedBody}"\n` +
+      `═════════════════════════════════════════════════════════════\n`;
+  }
+
   let userContent = stripTriggerPrefix(text, botPhone);
   if (voiceTranscription) {
     userContent = `(voice note: "${voiceTranscription}")` + (userContent ? ` — Note: ${userContent}` : '');
@@ -1425,14 +1568,39 @@ export async function handleMessage(sock, msg) {
     userContent = '(shared an attachment)';
   }
 
-  let enrichedMessage = isDM
-    ? `[Private 1-on-1 direct chat with ${senderName}]: ${userContent}`
-    : `[${senderName} says in group]: ${userContent}`;
+  let enrichedMessage = '';
 
-  if (!directTrigger) {
+  if (directTrigger) {
+    if (quotedContextBlock) {
+      const quotedSender = quotedInfo.senderName || 'a teammate';
+      if (userContent) {
+        enrichedMessage = isDM
+          ? `[Private 1-on-1 direct chat with ${senderName}, replying to a previous message from ${quotedSender}]: "${userContent}"\n` +
+            quotedContextBlock +
+            `[Instructions: ${senderName} quoted the previous message above and asked you about it. Review that quoted message and address their question/request directly!]`
+          : `[${senderName} says in group, replying to a previous message from ${quotedSender}]: "${userContent}"\n` +
+            quotedContextBlock +
+            `[Instructions: ${senderName} tagged you on the previous message above. Address their question or comment about it, taking full context of what ${quotedSender} said.]`;
+      } else {
+        // User quoted a message and simply tagged @D or typed D without any additional text
+        enrichedMessage = isDM
+          ? `[Private 1-on-1 direct chat: ${senderName} quoted a previous message from ${quotedSender} and tagged you to look at it]:\n` +
+            quotedContextBlock +
+            `[Instructions: ${senderName} tagged you on the quoted message above. Review it carefully, understand what was asked or discussed, and provide your expert perspective, answer, or helpful feedback as D.]`
+          : `[${senderName} quoted a previous message from ${quotedSender} in the group and tagged you to look at it]:\n` +
+            quotedContextBlock +
+            `[Instructions: ${senderName} tagged you directly to review/answer the quoted message above from ${quotedSender}. Analyze what ${quotedSender} said, answer any question in it, resolve any doubt, or chime in with helpful input as D!]`;
+      }
+    } else {
+      enrichedMessage = isDM
+        ? `[Private 1-on-1 direct chat with ${senderName}]: ${userContent || text}`
+        : `[${senderName} says in group]: ${userContent || text}`;
+    }
+  } else {
+    // Organic chime-in
     enrichedMessage = `[ORGANIC GROUP ENGAGEMENT — You were NOT explicitly tagged. Evaluate if you should weigh in]
-${senderName} said in group: "${userContent}"
-
+${senderName} said in group: "${userContent || text}"
+${quotedContextBlock ? `\n(Note: ${senderName} is replying to this previous message:\n${quotedContextBlock})\n` : ''}
 Decision Rules:
 - READ THE MESSAGE CAREFULLY before deciding what kind of response it needs.
 - This does NOT have to be about tech or coding. If someone is venting, joking, sharing something personal, talking about food, life, sports, or anything human — respond to THAT genuinely. You are a whole person in this group, not just a code bot.
@@ -1460,8 +1628,12 @@ Decision Rules:
   // ── 8. Call AI ───────────────────────────────────────────────────────────
 
   // Record user's turn in multi-turn conversation memory
-  if (text || userContent) {
-    saveConversationTurn(remoteJid, senderJid, 'user', text || userContent);
+  if (text || userContent || quotedInfo) {
+    const quotedSummary = quotedInfo?.text
+      ? ` [replying to ${quotedInfo.senderName || 'teammate'}: "${quotedInfo.text.slice(0, 100)}"]`
+      : '';
+    const turnText = (userContent || text || '(tagged D on replied message)') + quotedSummary;
+    saveConversationTurn(remoteJid, senderJid, 'user', turnText);
   }
 
   let aiResult;

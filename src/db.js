@@ -122,6 +122,7 @@ db.exec(`
     sender_jid   TEXT DEFAULT '',
     content      TEXT DEFAULT '',
     has_media    INTEGER DEFAULT 0,
+    msg_id       TEXT DEFAULT '',
     timestamp    TEXT DEFAULT (datetime('now'))
   );
 
@@ -218,6 +219,7 @@ const tableMigrations = [
   `ALTER TABLE authorized_chats ADD COLUMN chime_mode TEXT DEFAULT 'normal';`,
   `ALTER TABLE team_members ADD COLUMN email TEXT DEFAULT '';`,
   `ALTER TABLE team_members ADD COLUMN extra_info TEXT DEFAULT '';`,
+  `ALTER TABLE messages ADD COLUMN msg_id TEXT DEFAULT '';`,
 ];
 for (const sql of tableMigrations) {
   try { db.exec(sql); } catch (e) { /* Column already exists */ }
@@ -501,12 +503,23 @@ export function searchProjectNotes(keyword = '') {
 // ─── messages ─────────────────────────────────────────────────────────────────
 
 /** Persist a group message. */
-export function logMessage({ group_jid, sender_name, sender_jid, content, has_media }) {
+export function logMessage({ group_jid, sender_name, sender_jid, content, has_media, msg_id }) {
   const now = getNow();
   db.prepare(`
-    INSERT INTO messages (group_jid, sender_name, sender_jid, content, has_media, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(group_jid, sender_name || '', sender_jid || '', content || '', has_media ? 1 : 0, now);
+    INSERT INTO messages (group_jid, sender_name, sender_jid, content, has_media, msg_id, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(group_jid, sender_name || '', sender_jid || '', content || '', has_media ? 1 : 0, msg_id || '', now);
+}
+
+/** Retrieve a logged message by its WhatsApp message ID (stanzaId). */
+export function getMessageByMsgId(msg_id) {
+  if (!msg_id) return null;
+  return db.prepare(`
+    SELECT * FROM messages
+    WHERE msg_id = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(msg_id);
 }
 
 /** Retrieve the last N messages for a group. */
